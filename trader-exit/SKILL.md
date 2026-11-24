@@ -11,7 +11,8 @@ description: >-
   Budget Manager and Price Alerts. Long side only. Use when the user says
   "where's my stop", "set my stop and target", "plan the exit", "when do I get
   out", "stop loss", "what's my R", "risk reward", or right after
-  /trader-entry triggers, before /trader-timemachine.
+  /trader-entry triggers, before /trader-timemachine. Works for US tickers
+  and Canadian ones (TSX RY.TO, TSX Venture ABC.V), in C$.
 argument-hint: "[--stop or-mid|or-low|price:X|pct:X|atr:K] [--target 2R|1R|price:X]"
 ---
 
@@ -36,7 +37,16 @@ python3 "${CLAUDE_SKILL_DIR}/exit.py" show                          # the curren
 
 Other flags: `--flat-by 15:55`, `--json`, `--now "2026-10-19 10:15"` (New
 York time), `--entry PRICE` with a waiting entry.json to plan ahead, `--setup
-level`, `--offline FILE` (a saved Yahoo chart JSON for an ATR stop).
+level`, `--offline FILE` (a saved Yahoo chart JSON for an ATR stop),
+`--currency USD|CAD`.
+
+**Canadian tickers.** `RY.TO`, `RCI.B.TO` (Toronto) and `ABC.V` (TSX
+Venture) work like US ones. The currency comes from entry.json, else the
+Yahoo chart for an ATR stop, else CAD for a `.TO` / `.V` symbol (`--currency`
+overrides it). Prices print as `C$141.20`, and plan.json gets `"currency":
+"CAD"`; a US plan has no currency field. The flat-by time follows the TSX's
+calendar: the TSX keeps a full day on the day after US Thanksgiving and
+closes at 1:00 p.m. on Christmas Eve.
 
 ## What it reads and writes
 
@@ -45,7 +55,7 @@ level`, `--offline FILE` (a saved Yahoo chart JSON for an ATR stop).
 | `trader/entry.json` | the trigger from trader-entry: symbol, entry price, time, bar, opening range |
 | `trader/config.json` | `flat_by` (15:55) and `min_reward_risk` (1.0: a note here, trader-risk enforces it) |
 | Yahoo chart API | only for an `atr:K` stop: the session's bars up to the entry bar, free and unofficial |
-| `trader/plan.json` | with `--write`: entry, stop and its rule, target and its R, risk a share, reward:risk, flat by. trader-timemachine, trader-budget and trader-alerts read it |
+| `trader/plan.json` | with `--write`: entry, stop and its rule, target and its R, risk a share, reward:risk, flat by (and `currency` when not US dollars). trader-timemachine, trader-budget and trader-alerts read it |
 
 ## Stops and targets
 
@@ -67,8 +77,8 @@ A level setup has no opening range to lean on, so it needs a stop you name.
   spread, normal wiggle would stop you out. An entry.json that has not
   triggered (unless you give `--entry`). A short: v2 plans longs only.
 - **Flat by.** 15:55 by default (or `flat_by` in the config). Out by then,
-  win or lose, no overnight hold. On a 1:00 p.m. early close it moves up to
-  12:55. An entry at or after the flat-by time is refused.
+  win or lose, no overnight hold. On a 1:00 p.m. early close (the NYSE's, or
+  the TSX's for a Canadian symbol) it moves up to 12:55. An entry at or after the flat-by time is refused.
 
 ## Steps
 

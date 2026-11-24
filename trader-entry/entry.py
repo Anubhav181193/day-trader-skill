@@ -8,6 +8,11 @@ moment to get in. Standard library only. Long side only. It never places an orde
     python3 entry.py check TSLA --interval 1m --min-volume-x 1.5 --write
     python3 entry.py watch TSLA --every 30 --until 15:30  # one line per closed bar
     python3 entry.py watchlist                            # every hit in trader/watchlist.json
+    python3 entry.py check RY.TO                          # Canadian: TSX .TO / TSX Venture .V, C$ prices
+
+Canadian listings (RY.TO, RCI.B.TO, ABC.V) go to Yahoo as RCI-B.TO (suffix kept)
+and use the TSX holiday calendar; hours are New York's. Prices in Canadian dollars
+print as C$ and entry.json gets "currency": "CAD" (no currency field for US dollars).
 
 Setups (v2 plans longs only):
   orb    opening-range breakout. The range is the high and low of the first
@@ -98,6 +103,38 @@ NYSE_EARLY_CLOSE = {  # 1:00 p.m. ET
     "2026-12-24": "Christmas Eve",
     "2027-11-26": "day after Thanksgiving",
 }
+# Toronto Stock Exchange / TSX Venture, from tsx.com's calendar page (checked 2026-11-23).
+# Same hours as New York (9:30 to 4:00 ET); Christmas Eve closes at 1:00 p.m.
+TSX_HOLIDAYS = {
+    "2026-01-01": "New Year's Day",
+    "2026-02-16": "Family Day",
+    "2026-04-03": "Good Friday",
+    "2026-05-18": "Victoria Day",
+    "2026-07-01": "Canada Day",
+    "2026-08-03": "Civic Holiday",
+    "2026-09-07": "Labour Day",
+    "2026-10-12": "Thanksgiving Day",
+    "2026-12-25": "Christmas Day",
+    "2026-12-28": "Boxing Day (observed)",
+    "2027-01-01": "New Year's Day",
+    "2027-02-15": "Family Day",
+    "2027-03-26": "Good Friday",
+    "2027-05-24": "Victoria Day",
+    "2027-07-01": "Canada Day",
+    "2027-08-02": "Civic Holiday",
+    "2027-09-06": "Labour Day",
+    "2027-10-11": "Thanksgiving Day",
+    "2027-12-27": "Christmas Day (observed)",
+    "2027-12-28": "Boxing Day (observed)",
+}
+TSX_EARLY_CLOSE = {  # 1:00 p.m. ET
+    "2026-12-24": "Christmas Eve",
+    "2027-12-24": "Christmas Eve",
+}
+CALENDARS = {"us": ("NYSE", NYSE_HOLIDAYS, NYSE_EARLY_CLOSE), "ca": ("TSX", TSX_HOLIDAYS, TSX_EARLY_CLOSE)}
+EXCHANGE_SITE = {"us": "nyse.com", "ca": "tsx.com"}
+# Yahoo suffixes for Canadian listings: Toronto, TSX Venture, Cboe Canada, CSE
+CA_SUFFIXES = (".TO", ".V", ".NE", ".CN")
 CALENDAR_YEARS = (2026, 2027)
 OPEN = datetime.time(9, 30)
 CLOSE = datetime.time(16, 0)
@@ -198,28 +235,36 @@ def ampm(t):
     return "%d:%02d %s" % (h, t.minute, "AM" if t.hour < 12 else "PM")
 
 
-def trading_day(d):
-    """(is_trading_day, reason). Weekends and the NYSE holiday list."""
+def market_of(sym):
+    """'ca' for a Canadian listing (RY.TO, ABC.V), 'us' for everything else."""
+    s = (sym or "").upper()
+    return "ca" if s.endswith(CA_SUFFIXES) else "us"
+
+
+def trading_day(d, market="us"):
+    """(is_trading_day, reason). Weekends and the exchange's holiday list (NYSE or TSX)."""
     if d.weekday() >= 5:
         return False, "weekend"
-    name = NYSE_HOLIDAYS.get(d.isoformat())
+    exch, holidays, _ = CALENDARS[market]
+    name = holidays.get(d.isoformat())
     if name:
-        return False, "NYSE holiday: " + name
+        return False, "%s holiday: %s" % (exch, name)
     return True, ""
 
 
-def session(d):
-    """(open_time, close_time) in New York time, or None if closed all day."""
-    ok, _ = trading_day(d)
+def session(d, market="us"):
+    """(open_time, close_time) in New York time, or None if closed all day.
+    TSX keeps New York's hours, so only the holidays differ."""
+    ok, _ = trading_day(d, market)
     if not ok:
         return None
-    return OPEN, (EARLY if d.isoformat() in NYSE_EARLY_CLOSE else CLOSE)
+    return OPEN, (EARLY if d.isoformat() in CALENDARS[market][2] else CLOSE)
 
 
-def next_open(d):
+def next_open(d, market="us"):
     nd = d + datetime.timedelta(days=1)
     for _ in range(15):
-        if session(nd):
+        if session(nd, market):
             return "%s 09:30" % nd.isoformat()
         nd += datetime.timedelta(days=1)
     return None
@@ -228,7 +273,32 @@ def next_open(d):
 # ---------------------------------------------------------------- Yahoo
 
 def yahoo_symbol(sym):
-    return sym.upper().replace(".", "-")
+    """BRK.B -> BRK-B; a Canadian listing keeps its exchange suffix: RCI.B.TO -> RCI-B.TO."""
+    s = sym.upper()
+    for suf in CA_SUFFIXES:
+        if s.endswith(suf):
+            return s[:-len(suf)].replace(".", "-") + suf
+    return s.replace(".", "-")
+
+
+to_yahoo = yahoo_symbol
+
+
+def from_yahoo(ysym):
+    """Yahoo's RCI-B.TO back to the TSX's RCI.B.TO. US symbols come back as Yahoo
+    spells them (BRK-B), as they always have."""
+    s = (ysym or "").upper()
+    for suf in CA_SUFFIXES:
+        if s.endswith(suf):
+            return s[:-len(suf)].replace("-", ".") + suf
+    return s
+
+
+def money(x, currency=None):
+    """$ for US dollars, C$ for Canadian, else the code in front. Two decimals, no
+    thousands separator (this tool's US output always read $1234.50)."""
+    prefix = {None: "$", "": "$", "USD": "$", "CAD": "C$"}.get(currency, (currency or "") + " ")
+    return prefix + "%.2f" % x
 
 
 def chart_path(sym, rng, interval):
@@ -328,7 +398,7 @@ def parse_chart(text, sym):
                      "l": float(c if lo is None else lo), "c": float(c), "v": int(at("volume", i) or 0)})
     return {"symbol": str(meta.get("symbol") or sym).upper(), "meta": meta, "bars": bars,
             "prev_close": meta.get("previousClose") or meta.get("chartPreviousClose"),
-            "data_time": meta.get("regularMarketTime")}
+            "data_time": meta.get("regularMarketTime"), "currency": meta.get("currency")}
 
 
 def read_text(path):
@@ -366,6 +436,7 @@ def get_chart(sym, interval, day=None, offline=None, today=None):
     ch = parse_chart(text, sym)
     if ch["symbol"] != yahoo_symbol(sym):
         raise EntryError("the chart file holds %s, not %s" % (ch["symbol"], sym))
+    ch["symbol"] = from_yahoo(ch["symbol"])   # RCI-B.TO -> RCI.B.TO; US unchanged
     gran = ch["meta"].get("dataGranularity")
     if gran and gran != interval:
         raise EntryError("%s has %s bars, not %s: use --interval %s" % (sym, gran, interval, gran))
@@ -426,21 +497,26 @@ def evaluate(chart, now_utc, setup="orb", or_minutes=15, interval="5m", level=No
            "phase": "", "reason": "", "opening_range": None, "level": None, "trigger": None,
            "last": None, "forming": None, "min_volume_x": min_volume_x,
            "prev_close": chart.get("prev_close"), "calendar_known": day.year in CALENDAR_YEARS, "_bars": []}
+    market = market_of(chart["symbol"])
+    exch = CALENDARS[market][0]
+    cur = chart.get("currency")
+    if cur and cur != "USD":
+        res["currency"] = cur          # only for non-US dollars: US output stays as it was
     dt = chart.get("data_time")
     res["data_time"] = to_eastern(utc_of(dt)).strftime("%Y-%m-%d %H:%M:%S") if dt else None
-    ok, why = trading_day(day)
+    ok, why = trading_day(day, market)
     if not ok:
-        res.update(status="no-data", phase="closed", reason="the NYSE is closed today (%s)" % why,
-                   next_open=next_open(day))
+        res.update(status="no-data", phase="closed", reason="the %s is closed today (%s)" % (exch, why),
+                   next_open=next_open(day, market))
         return res
-    o, c = session(day)
+    o, c = session(day, market)
     open_dt = datetime.datetime.combine(day, o)
     close_dt = datetime.datetime.combine(day, c)
     early = c != CLOSE
     before = datetime.datetime.combine(day, parse_hhmm(cfg["no_entries_before"], "no_entries_before"))
     cutoff = early_cutoff(day, parse_hhmm(cfg["no_entries_after"], "no_entries_after"), close_dt)
     or_end = open_dt + datetime.timedelta(minutes=or_minutes)
-    res.update(opens=hm(o), closes=hm(c), early_close=NYSE_EARLY_CLOSE.get(day.isoformat()),
+    res.update(opens=hm(o), closes=hm(c), early_close=CALENDARS[market][2].get(day.isoformat()),
                no_entries_before=hm(before), no_entries_after=hm(cutoff))
 
     by_slot = {}
@@ -475,7 +551,7 @@ def evaluate(chart, now_utc, setup="orb", or_minutes=15, interval="5m", level=No
     res["bars_closed"] = len(bars)
 
     if local < open_dt:
-        res.update(phase="pre-open", reason="the NYSE opens at 9:30%s" % (
+        res.update(phase="pre-open", reason="the %s opens at 9:30%s" % (exch,
             " and the %d-minute range is set at %s" % (or_minutes, short(or_end)) if setup == "orb" else ""))
         return res
 
@@ -530,7 +606,7 @@ def evaluate(chart, now_utc, setup="orb", or_minutes=15, interval="5m", level=No
     if not bars:
         res.update(status="no-data", phase="open", reason="Yahoo sent no bars for %s yet" % day.isoformat())
         return res
-    what = "close above the range high $%.2f" % lvl if setup == "orb" else "close above $%.2f" % lvl
+    what = "close above the range high %s" % money(lvl, cur) if setup == "orb" else "close above %s" % money(lvl, cur)
     if local >= cutoff and not (pending and pending["end"] <= cutoff):
         res.update(status="expired", phase="after-close" if local >= close_dt else "after-cutoff",
                    reason="no %s by %s, the last time for a new entry%s" % (
@@ -538,16 +614,16 @@ def evaluate(chart, now_utc, setup="orb", or_minutes=15, interval="5m", level=No
         return res
     res["phase"] = "open"
     if last["c"] > lvl and last in thin:
-        res["reason"] = "the %s bar closed above at $%.2f but on %.2fx the range's volume, under your %.2fx" % (
-            short(last["et"]), last["c"], last["v"] / avg_vol if avg_vol else 0, min_volume_x)
+        res["reason"] = "the %s bar closed above at %s but on %.2fx the range's volume, under your %.2fx" % (
+            short(last["et"]), money(last["c"], cur), last["v"] / avg_vol if avg_vol else 0, min_volume_x)
     elif last["c"] > lvl and last["end"] < before:
-        res["reason"] = "the %s bar closed above at $%.2f, but no entries before %s (config)" % (
-            short(last["et"]), last["c"], short(before))
+        res["reason"] = "the %s bar closed above at %s, but no entries before %s (config)" % (
+            short(last["et"]), money(last["c"], cur), short(before))
     else:
         gap = lvl - last["c"]
-        res["reason"] = "last close $%.2f (%s bar), $%.2f %s %s (%+.2f%%)" % (
-            last["c"], short(last["et"]), abs(gap), "under" if gap >= 0 else "over",
-            "the range high $%.2f" % lvl if setup == "orb" else "the level $%.2f" % lvl,
+        res["reason"] = "last close %s (%s bar), %s %s %s (%+.2f%%)" % (
+            money(last["c"], cur), short(last["et"]), money(abs(gap), cur), "under" if gap >= 0 else "over",
+            "the range high %s" % money(lvl, cur) if setup == "orb" else "the level %s" % money(lvl, cur),
             100.0 * (last["c"] / lvl - 1))
     return res
 
@@ -561,12 +637,15 @@ def entry_doc(res, now_utc):
     """trader/entry.json, the contract shape (plus a plain-words reason)."""
     t = res.get("trigger") or {}
     orr = res.get("opening_range")
-    return {"created_by": "trader-entry", "symbol": res["symbol"], "setup": res["setup"], "side": "buy",
+    doc = {"created_by": "trader-entry", "symbol": res["symbol"], "setup": res["setup"], "side": "buy",
             "date": res["date"], "status": res["status"], "time": t.get("time"), "bar_start": t.get("bar_start"),
             "bar_index": t.get("bar_index"), "price": t.get("price"), "level": res.get("level"),
             "interval": res["interval"],
             "opening_range": {"high": orr["high"], "low": orr["low"], "minutes": orr["minutes"]} if orr else None,
             "source": "yahoo", "checked_at": iso(now_utc), "reason": res.get("reason")}
+    if res.get("currency"):
+        doc["currency"] = res["currency"]   # CAD for a Canadian listing; absent for US dollars
+    return doc
 
 
 def write_json(path, doc):
@@ -588,11 +667,14 @@ SHORT = {"pre-open": "not open", "forming": "forming", "closed": "closed"}
 def setup_name(res):
     if res["setup"] == "orb":
         return "opening-range breakout (%d-minute range)" % res["or_minutes"]
-    return "close above $%.2f" % res["level"] if res["level"] is not None else "close above a level"
+    return ("close above %s" % money(res["level"], res.get("currency"))) if res["level"] is not None \
+        else "close above a level"
 
 
 def describe(res):
     """Plain lines for a person."""
+    cur = res.get("currency")
+    market = market_of(res["symbol"])
     when = datetime.datetime.strptime(res["now"], "%Y-%m-%d %H:%M:%S")
     bars = "5-minute" if res["interval"] == "5m" else "1-minute"
     head = "%s  %s %s ET  %s on %s bars (Yahoo, free, can lag)" % (
@@ -604,21 +686,22 @@ def describe(res):
     if orr:
         start = datetime.datetime.strptime(res["opens"], "%H:%M")
         end = start + datetime.timedelta(minutes=orr["minutes"])
-        out.append("Opening range %s-%s: high $%.2f, low $%.2f (%d of %d bars%s)." % (
-            short(start), short(end), orr["high"], orr["low"], orr["bars"], orr["of"],
+        out.append("Opening range %s-%s: high %s, low %s (%d of %d bars%s)." % (
+            short(start), short(end), money(orr["high"], cur), money(orr["low"], cur), orr["bars"], orr["of"],
             "" if orr["complete"] else ", still forming"))
     label = PHASE_LABEL.get(res["phase"]) or LABEL.get(res["status"], res["status"].upper())
     t = res.get("trigger")
     if t:
-        out.append("TRIGGERED %s at $%.2f: the %s bar (bar %d) closed above %s $%.2f (%+.2f%%%s)." % (
-            t["time"], t["price"], short(datetime.datetime.strptime(t["bar_start"], "%H:%M")), t["bar_index"],
-            "the range high" if res["setup"] == "orb" else "the level", res["level"], t["pct_over"],
+        out.append("TRIGGERED %s at %s: the %s bar (bar %d) closed above %s %s (%+.2f%%%s)." % (
+            t["time"], money(t["price"], cur), short(datetime.datetime.strptime(t["bar_start"], "%H:%M")),
+            t["bar_index"], "the range high" if res["setup"] == "orb" else "the level", money(res["level"], cur),
+            t["pct_over"],
             (", %.2fx the range's volume" % t["volume_x"]) if res.get("min_volume_x") and t.get("volume_x") else ""))
         step = INTERVALS[res["interval"]] // 60
         if res.get("minutes_since", 0) > step and res.get("last"):
-            out.append("That was %d minutes ago; the last close is $%.2f (%s bar). A late entry is a different "
+            out.append("That was %d minutes ago; the last close is %s (%s bar). A late entry is a different "
                        "trade: the price, the stop distance and the odds have moved." % (
-                           res["minutes_since"], res["last"]["close"], res["last"]["bar_start"]))
+                           res["minutes_since"], money(res["last"]["close"], cur), res["last"]["bar_start"]))
         if res.get("data_note"):
             out.append(res["data_note"] + ".")
         if res.get("minutes_since", 0) > step:
@@ -633,8 +716,8 @@ def describe(res):
         if res.get("lag_note") and res["status"] == "waiting":
             out.append(res["lag_note"] + ".")
         elif f and res["status"] == "waiting" and res["phase"] in ("open", "forming"):
-            out.append("The %s bar is still forming ($%.2f so far, closes %s); it does not count until it closes." % (
-                f["bar_start"].lstrip("0"), f["price"], f["closes"]))
+            out.append("The %s bar is still forming (%s so far, closes %s); it does not count until it closes." % (
+                f["bar_start"].lstrip("0"), money(f["price"], cur), f["closes"]))
         if res["status"] == "expired":
             out.append("No entry on this setup today. Nothing was placed.")
         if res.get("next_open"):
@@ -643,12 +726,17 @@ def describe(res):
         out.append("Early close today at 1:00 p.m. (%s): no new entries after %s." % (
             res["early_close"], res["no_entries_after"]))
     if not res.get("calendar_known"):
-        out.append("Holiday list covers %s only: check nyse.com for this date." % " and ".join(map(str, CALENDAR_YEARS)))
+        out.append("Holiday list covers %s only: check %s for this date." % (
+            " and ".join(map(str, CALENDAR_YEARS)), EXCHANGE_SITE[market]))
     return out
 
 
 def bar_line(b, res):
     """One watch line for a bar that just closed."""
+    cur = res.get("currency")
+
+    def m(x):
+        return money(x, cur)
     start = short(b["et"])
     orr = res.get("opening_range") or {}
     lvl = res.get("level")
@@ -656,16 +744,16 @@ def bar_line(b, res):
     n_or = orr.get("of") or 0
     if res["setup"] == "orb" and b["slot"] < n_or:
         seen = [x for x in res["_bars"] if x["slot"] <= b["slot"]]
-        note = "range so far $%.2f to $%.2f" % (min(x["l"] for x in seen), max(x["h"] for x in seen))
+        note = "range so far %s to %s" % (m(min(x["l"] for x in seen)), m(max(x["h"] for x in seen)))
         if b["slot"] == n_or - 1:
-            note = "opening range set: high $%.2f, low $%.2f" % (orr["high"], orr["low"])
+            note = "opening range set: high %s, low %s" % (m(orr["high"]), m(orr["low"]))
     elif t and t["bar_index"] == b["slot"]:
-        note = "TRIGGERED: closed above $%.2f (%+.2f%%). Get in now if you take it: %s, $%.2f" % (
-            lvl, t["pct_over"], t["time"], t["price"])
+        note = "TRIGGERED: closed above %s (%+.2f%%). Get in now if you take it: %s, %s" % (
+            m(lvl), t["pct_over"], t["time"], m(t["price"]))
     elif lvl is None:
         note = ""
     elif b["c"] > lvl:
-        note = "above $%.2f" % lvl
+        note = "above %s" % m(lvl)
         if res["setup"] == "level" or b["slot"] >= n_or:
             avg = orr.get("avg_volume")
             if res.get("min_volume_x") and avg:
@@ -673,8 +761,8 @@ def bar_line(b, res):
             elif b["end"] < datetime.datetime.combine(b["et"].date(), parse_hhmm(res["no_entries_before"], "x")):
                 note += ", but no entries before %s" % res["no_entries_before"]
     else:
-        note = "$%.2f under $%.2f" % (lvl - b["c"], lvl)
-    return "%5s bar  closed $%.2f  %s" % (start, b["c"], note)
+        note = "%s under %s" % (m(lvl - b["c"]), m(lvl))
+    return "%5s bar  closed %s  %s" % (start, m(b["c"]), note)
 
 
 # ---------------------------------------------------------------- watch
@@ -692,11 +780,13 @@ class SimClock(object):
         self.t += datetime.timedelta(seconds=max(1, int(round(seconds))))
 
 
-def watch_loop(provider, clock, sleep, emit, opts, every=30, until=None, max_errors=5, on_trigger=None):
+def watch_loop(provider, clock, sleep, emit, opts, every=30, until=None, max_errors=5, on_trigger=None,
+               market="us"):
     """Poll bar by bar until a trigger (0), expiry, the close or --until (1).
     provider(now_utc) -> chart, clock() -> naive UTC, sleep(seconds), emit(line).
     It sleeps in steps of at most `every` seconds and re-reads the clock each time,
-    so a computer that dozed off catches up as soon as it wakes."""
+    so a computer that dozed off catches up as soon as it wakes. `market` picks the
+    holiday calendar: "us" (NYSE) or "ca" (TSX)."""
     step = INTERVALS[opts.get("interval", "5m")]
     printed, errors, said_preopen, first = -1, 0, False, True
     next_fetch = None
@@ -707,9 +797,9 @@ def watch_loop(provider, clock, sleep, emit, opts, every=30, until=None, max_err
             continue
         local = to_eastern(now)
         day = local.date()
-        s = session(day)
+        s = session(day, market)
         if not s:
-            emit("%s: market closed today (%s). Nothing to watch." % (day.isoformat(), trading_day(day)[1]))
+            emit("%s: market closed today (%s). Nothing to watch." % (day.isoformat(), trading_day(day, market)[1]))
             return 1, None
         open_dt = datetime.datetime.combine(day, s[0])
         close_dt = datetime.datetime.combine(day, s[1])
@@ -854,7 +944,7 @@ def cmd_watch(a):
         print(line, flush=True)
 
     code, _ = watch_loop(provider, now_fn, sleep_fn, emit, opts, every=a.every, until=until,
-                         on_trigger=on_trigger)
+                         on_trigger=on_trigger, market=market_of(sym))
     return code
 
 
@@ -892,18 +982,21 @@ def cmd_watchlist(a):
     if a.json:
         print(json.dumps([{"symbol": s, "result": public(r) if r else None, "error": e} for s, r, e in rows], indent=2))
     else:
-        print("%-6s  %-9s  %-8s  %-8s  %-9s  %-9s  %s" % ("SYMBOL", "STATUS", "TIME", "PRICE", "LEVEL", "LAST", "VS LEVEL"))
+        w = max([6] + [len(s) for s, _, _ in rows])   # wider only for a long symbol (RCI.B.TO)
+        print("%-*s  %-9s  %-8s  %-8s  %-9s  %-9s  %s" % (w, "SYMBOL", "STATUS", "TIME", "PRICE", "LEVEL", "LAST",
+                                                          "VS LEVEL"))
         for s, r, e in rows:
             if e:
-                print("%-6s  error: %s" % (s, e))
+                print("%-*s  error: %s" % (w, s, e))
                 continue
             t = r.get("trigger") or {}
             last = r.get("last") or {}
+            cur = r.get("currency")
             status = SHORT.get(r["phase"], r["status"]) if r["status"] != "triggered" else "triggered"
-            print("%-6s  %-9s  %-8s  %-8s  %-9s  %-9s  %s" % (
-                s, status[:9], t.get("time") or "-", ("$%.2f" % t["price"]) if t else "-",
-                ("$%.2f" % r["level"]) if r.get("level") is not None else "-",
-                ("$%.2f" % last["close"]) if last else "-",
+            print("%-*s  %-9s  %-8s  %-8s  %-9s  %-9s  %s" % (
+                w, s, status[:9], t.get("time") or "-", money(t["price"], cur) if t else "-",
+                money(r["level"], cur) if r.get("level") is not None else "-",
+                money(last["close"], cur) if last else "-",
                 ("%+.2f%%" % last["vs_level_pct"]) if last.get("vs_level_pct") is not None else "-"))
         n = sum(1 for _, r, _ in rows if r and r["status"] == "triggered")
         print("%d of %d triggered. Pick one, then: entry.py check <TICKER> --write, and /trader-exit." % (n, len(rows)))
