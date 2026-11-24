@@ -501,7 +501,7 @@ class Cli(unittest.TestCase):
 
         # daily over that universe with the fixture charts: only KO and TSLA are in both, so partial
         code, text, _ = run(["daily", "--universe", uni, "--offline", DAILY, "--now", "2026-10-19 09:00",
-                             "--out", self.wl, "--min-volume", "0"])
+                             "--out", self.wl, "--min-volume", "0", "--sort", "traded"])
         self.assertEqual(code, 0)
         self.assertIn("Fetched 2 of 17 charts (15 failed or had no data)", text)
         doc = self.read(self.wl)
@@ -512,7 +512,7 @@ class Cli(unittest.TestCase):
 
         # the reel's 10:15 scan
         code, text, _ = run(["orb", "--offline", WALL, "--now", "2026-10-19 10:15", "--min-price", "0",
-                             "--out", self.wl])
+                             "--out", self.wl, "--sort", "time"])
         self.assertEqual(code, 0)
         self.assertIn("42 of 231 charts closed above their opening-range high by 10:15 AM", text)
         self.assertIn("10:15 AM  TSLA      $364.18  range 354.47 to 362.18  +0.55% over", text)
@@ -528,7 +528,7 @@ class Cli(unittest.TestCase):
 
         # the hits read back as a watchlist, with --at instead of --now
         code, text, _ = run(["orb", "--offline", WALL, "--at", "10:15", "--watchlist", self.wl, "--min-price", "0",
-                             "--json", "--no-write"])
+                             "--json", "--no-write", "--sort", "time"])
         self.assertEqual(code, 0)
         out = json.loads(text)
         self.assertEqual((out["universe"], out["scanned"], len(out["hits"])), (42, 42, 42))
@@ -557,7 +557,7 @@ class Cli(unittest.TestCase):
             fh.write("\n".join(sorted(bundle)) + "\n")
         try:
             code, text, _ = run(["orb", "--universe", uni, "--now", "2026-10-19 10:15", "--min-price", "0",
-                                 "--max-confirm", "10", "--no-write"])
+                                 "--max-confirm", "10", "--no-write", "--sort", "time"])
         finally:
             scan.yahoo_get, scan.SLEEP, scan.parse_now = old_get, old_sleep, real_now
         self.assertEqual(code, 0)
@@ -635,7 +635,7 @@ class Cli(unittest.TestCase):
 
     def test_daily_json(self):
         code, text, _ = run(["daily", "--offline", DAILY, "--now", "2026-10-19 09:00", "--json", "--no-write",
-                             "--min-volume", "0", "--min-price", "0"])
+                             "--min-volume", "0", "--min-price", "0", "--sort", "traded"])
         self.assertEqual(code, 0)
         out = json.loads(text)
         self.assertEqual(len(out["hits"]), 15)
