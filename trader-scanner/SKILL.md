@@ -4,6 +4,7 @@ description: >-
   Chart Scanner. Scans thousands of charts for setups: opening-range
   breakouts, flags, oversold bounces. Builds the list of US-listed common
   stocks, ordinary shares and ADRs from Nasdaq Trader's symbol directories,
+  and of Canadian shares (TSX .TO, TSX Venture .V) from tsx.com's directories,
   runs a pre-market scan of daily closes (20-day closing-high breakout, bull
   flag, reclaimed the 20-day average, oversold, oversold bounce) and an
   intraday opening-range breakout scan on 5-minute bars, then writes
@@ -11,8 +12,9 @@ description: >-
   bar by bar. Use when the user says "scan the market", "find me setups",
   "what is breaking out", "opening range breakouts", "scan for bull flags",
   "oversold stocks", "pre-market scan", "build my watchlist", "what should I
-  look at today", or at the start of a trading day before /trader-news.
-argument-hint: "[universe | daily | orb] [--at HH:MM]"
+  look at today", "scan the TSX", "Canadian stocks", or at the start of a
+  trading day before /trader-news.
+argument-hint: "[universe | daily | orb] [--market us|ca|all] [--at HH:MM]"
 ---
 
 # trader-scanner
@@ -33,9 +35,14 @@ python3 "${CLAUDE_SKILL_DIR}/scan.py" daily --symbols TSLA,NVDA,AMD  # or --watc
 python3 "${CLAUDE_SKILL_DIR}/scan.py" orb                            # after 9:50 AM ET -> trader/watchlist.json
 python3 "${CLAUDE_SKILL_DIR}/scan.py" orb --at 10:15                 # cut the clock at 10:15 AM ET
 python3 "${CLAUDE_SKILL_DIR}/scan.py" orb --watchlist trader/watchlist.json --json
+python3 "${CLAUDE_SKILL_DIR}/scan.py" universe --market ca             # -> trader/universe-ca.txt
+python3 "${CLAUDE_SKILL_DIR}/scan.py" daily --market ca                # Canada only (or --market all)
+python3 "${CLAUDE_SKILL_DIR}/scan.py" orb --symbols RY.TO,SHOP.TO,CNQ.TO
 ```
 
-Flags: `--min-price 5` and `--min-volume` (daily 1,000,000, orb 0),
+Flags: `--market us|ca|all` (which universe file; default us), `--min-price 5`
+and `--min-volume` (daily 1,000,000 for US names and 200,000 for Canadian
+ones unless you give a number, orb 0),
 `--or-minutes 15`, `--max-confirm 200` (orb stage 2),
 `--now "2026-10-19 10:15"` (New York time) to pin the clock, `--offline PATH`
 to read saved Yahoo files, `--no-write`, `--show N`, `--json`. Exit code 0
@@ -47,6 +54,7 @@ reason is one plain line).
 | file | what |
 | --- | --- |
 | `trader/universe.txt` | written by `universe`: one `SYMBOL\|Name` a line, read by `daily` and `orb` |
+| `trader/universe-ca.txt` | written by `universe --market ca`: `RY.TO\|Royal Bank of Canada`, read with `--market ca` or `all` |
 | `trader/watchlist.json` | written by `daily` and `orb`: `mode`, `as_of`, `universe`, `scanned`, `failed`, `hits[]`. trader-news and trader-entry read `hits[].symbol` |
 | `trader/config.json` | read by `orb`: `no_entries_after` (default 15:30) |
 
@@ -73,6 +81,37 @@ On the Oct 19 2026 files this keeps 5,943. The reel said 5,259: that count
 came from an ad hoc filter (names that say common or ordinary, no ADRs). All
 5,259 of those are in this list; the 684 extra are mostly ADRs, closed-end
 funds and partnership units. The Oct 20 files gave 5,942.
+
+## Canada (TSX and TSX Venture)
+
+`universe --market ca` downloads the TSX and TSX Venture company
+directories from tsx.com (`/json/company-directory/search/tsx/^*` and
+`.../tsxv/^*`) and writes `RY.TO` for Toronto, `ABC.V` for the Venture
+exchange. It keeps a listing when:
+
+1. Its symbol is a plain share: 1 to 6 letters or digits, optionally one
+   class (`.A`, `.B`, `.C`) or trust units (`.UN`). Out: `.U` (the same
+   stock priced in US dollars), `.PR` / `.PF` (preferred), `.DB`
+   (debentures), `.WT` (warrants), `.NT` (notes), `.P` (Venture capital pool
+   shells with no business yet), and fund series.
+2. The company name is not a fund: ETF, fund, index, portfolio, CDR
+   (Canadian depositary receipts of US stocks), split shares, covered call,
+   hedged. The directory does not say ETF, so the scan also skips anything
+   Yahoo's chart labels `ETF` or `MUTUALFUND` and says how many it skipped.
+
+On the Nov 23 2026 files this keeps 1,994 (716 TSX, 1,278 Venture), and the
+daily scan finds about 224 that clear $5 and 200,000 shares.
+
+Toronto trades the same hours as New York (9:30 AM to 4:00 PM ET), so every
+time in this skill is still New York time. The holidays differ: each symbol
+uses its own exchange's calendar (TSX holidays for 2026 and 2027 from
+tsx.com, read 2026-11-23: Family Day, Victoria Day, Canada Day, Civic
+Holiday, Canadian Thanksgiving in October, Boxing Day; Christmas Eve closes
+at 1:00 PM). On Canada Day an `orb` scan of `--market all` still runs the US
+charts; a Canadian-only scan says the market is closed. Prices of Canadian
+hits show as `C$` and the hit carries `"currency": "CAD"`.
+
+Yahoo needs the suffix kept: `RCI.B.TO` is fetched as `RCI-B.TO`.
 
 ## The daily scan (before the open)
 
@@ -139,6 +178,7 @@ are in the calendar.
 - Partial results are said as partial: "Fetched 4,980 of 5,259 charts (279
   failed or had no data)". Never round a partial scan up to "the whole market".
 - NYSE holidays and early closes for 2026 and 2027 (nyse.com, read 2026-10-13).
+- TSX holidays and early closes for 2026 and 2027 (tsx.com, read 2026-11-23).
 
 ## Steps
 

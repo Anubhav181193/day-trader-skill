@@ -11,7 +11,8 @@ description: >-
   places an order. Use when the user says "tell me when to get in", "watch
   TSLA", "has it broken out", "did it break the opening range", "entry
   signal", "time my entry", "check my watchlist", or after /trader-scanner
-  and /trader-news, before /trader-exit.
+  and /trader-news, before /trader-exit. Works for US tickers and Canadian
+  ones (TSX RY.TO, TSX Venture ABC.V).
 argument-hint: "[TICKER] [--setup orb|level] [--interval 5m|1m]"
 ---
 
@@ -41,6 +42,15 @@ saved Yahoo chart JSON, `.json` or `.json.gz`, or a folder of
 `watch` with `--now` or `--offline` runs on a simulated clock and replays the
 day bar by bar without waiting.
 
+**Canadian tickers.** Give the TSX symbol with its suffix: `RY.TO`,
+`RCI.B.TO`, `REI.UN.TO` (Toronto) or `ABC.V` (TSX Venture). Yahoo gets
+`RCI-B.TO` (inner dots become dashes, the suffix stays); the output and
+entry.json keep `RCI.B.TO`. Hours are the same as New York (9:30 to 4:00
+ET), but the holidays are the TSX's: closed on Canada Day, Victoria Day,
+Family Day and the rest, open on US Thanksgiving. Prices in Canadian dollars
+print as `C$141.20`, and entry.json gets `"currency": "CAD"` (US entries have
+no currency field).
+
 ## What it reads and writes
 
 | file | what |
@@ -48,7 +58,7 @@ day bar by bar without waiting.
 | `trader/watchlist.json` | the scanner's hits (`hits[].symbol`), for `watchlist` |
 | `trader/config.json` | `no_entries_before` (09:45) and `no_entries_after` (15:30), New York time. Optional |
 | Yahoo chart API | today's bars, `range=1d&interval=5m` (or `1m`): free, unofficial, can lag |
-| `trader/entry.json` | with `check --write`, or when `watch` triggers: symbol, setup, status, time, bar, price, level, opening range |
+| `trader/entry.json` | with `check --write`, or when `watch` triggers: symbol, setup, status, time, bar, price, level, opening range (and `currency` when not US dollars) |
 
 ## The rule
 
@@ -71,7 +81,8 @@ day bar by bar without waiting.
   p.m. early close the cutoff moves up with the close, to 12:30.
 - **What it says.** Waiting (and how far the last close is from the level),
   triggered, expired, or no data. Before 9:30: not open yet. Before 9:45: the
-  range is still forming. Weekends and NYSE holidays: the market is closed.
+  range is still forming. Weekends and NYSE holidays (TSX holidays for a
+  `.TO` or `.V` symbol): the market is closed.
 
 ## Steps
 

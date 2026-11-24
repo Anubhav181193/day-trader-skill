@@ -120,6 +120,38 @@ An example, the trade in the reel: Tesla, Monday October 19 2026, real data.
 9. **`/trader-alerts`** rings on the stop, the target and at 3:55 PM to
    flatten whatever is still open.
 
+## Canada (TSX and TSX Venture)
+
+This fork adds Canadian stocks. Every tool takes Toronto tickers (`RY.TO`,
+`RCI.B.TO`, `REI.UN.TO`) and TSX Venture tickers (`ABC.V`) next to US ones.
+
+```bash
+python3 trader-scanner/scan.py universe --market ca        # ~2,000 TSX + TSXV shares, from tsx.com
+python3 trader-scanner/scan.py daily --market ca           # or --market all for US and Canada together
+python3 trader-entry/entry.py check RY.TO --setup orb
+python3 trader-timemachine/timemachine.py run --write
+```
+
+- **Same hours, different holidays.** Toronto trades 9:30 AM to 4:00 PM New
+  York time, so every time stays New York time. Each symbol uses its own
+  exchange's calendar: TSX holidays for 2026 and 2027 (Family Day, Victoria
+  Day, Canada Day, Civic Holiday, Canadian Thanksgiving, Boxing Day) and the
+  1:00 PM Christmas Eve close, from tsx.com.
+- **Canadian dollars.** Prices show as `C$`, and plans and orders carry
+  `"currency": "CAD"`. Set `"account_currency": "CAD"` in `trader/config.json`
+  for a Canadian-dollar account. Risk and budget refuse an order whose currency
+  is not your account's. Nothing converts currencies.
+- **Broker.** Alpaca does not trade Canadian listings, so trader-risk blocks
+  a Canadian order when `"broker"` is `"alpaca"`. Use Interactive Brokers
+  (`"broker": "ibkr"`, Setup B in trader-broker), which drafts the order in
+  your IBKR account for you to approve there. Questrade and Wealthsimple have
+  no Claude connector.
+- **News.** Yahoo's Canadian headline feed for `.TO` / `.V` tickers. Canadian
+  companies file on SEDAR+, which the news tool does not read, so it skips SEC
+  filings for them and says so.
+- **Data.** The scanner reads `www.tsx.com` for the symbol list; prices still
+  come from Yahoo. Yahoo labels funds, so Canadian ETFs are skipped at scan time.
+
 ## The tools
 
 All standard-library Python. The data tools read public endpoints and are

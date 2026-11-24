@@ -29,6 +29,10 @@ work around the one moment that matters, your yes:
     python3 ticket.py flatten --symbol TSLA --qty 8
     python3 ticket.py log
 
+Canadian listings (RY.TO, RCI.B.TO, ABC.V) show C$ amounts. Alpaca trades US
+listings only, so with "broker": "alpaca" (the default) a Canadian order is never
+READY; Interactive Brokers ("broker": "ibkr") trades the TSX.
+
 Everything is written to trader/state/broker.json (append only). Dates are
 New York dates; --now "2026-10-19 10:15" pins the clock.
 """
@@ -51,6 +55,12 @@ TIF_WORDS = {"day": "good for today", "gtc": "good until canceled", "opg": "at t
              "cls": "at the close", "ioc": "immediate or cancel", "fok": "fill or kill"}
 YES_WORDS = ("yes", "y")
 BATCH_WORDS = {"all", "every", "everything", "rest", "remaining", "them", "both", "batch", "each"}
+CA_SUFFIXES = (".TO", ".V", ".NE", ".CN")   # Yahoo suffixes for Canadian listings
+# US class shares whose class letter is V look like TSX Venture tickers. They stay US
+# (Nasdaq Trader's lists, read 2026-11-23): MKC.V is McCormick's voting stock on the NYSE.
+US_DOT_V = ("MKC.V",)
+# a ticker in a reply: TSLA, BRK.B, RY.TO, RCI.B.TO, RCI-B.TO
+SYMBOL_TOKEN = re.compile(r"[A-Z][A-Z0-9]*(?:[.\-][A-Z0-9]+)*")
 DOUBT_WORDS = {"no", "not", "dont", "don't", "wait", "cancel", "stop", "but", "maybe", "later",
                "hold", "unless", "if"}
 
@@ -176,10 +186,44 @@ def tool_input(order):
     return out
 
 
-def _money(v):
+def is_canadian(sym):
+    s = str(sym or "").strip().upper()
+    return s.endswith(CA_SUFFIXES) and s.replace("-", ".") not in US_DOT_V
+
+
+def currency_of(order):
+    """The order's "currency" (or its plan's); else CAD for a Canadian listing (USD for a
+    .U one), else USD."""
+    plan = order.get("plan") if isinstance(order.get("plan"), dict) else {}
+    cur = order.get("currency") or plan.get("currency")
+    if cur:
+        return str(cur).strip().upper()
+    sym = str(order.get("symbol", "")).strip().upper()
+    if is_canadian(sym):
+        return "USD" if re.search(r"[.\-]U\.[A-Z]+$", sym) else "CAD"
+    return "USD"
+
+
+CURRENCY_WORDS = {"CAD": "Canadian dollars (C$)", "USD": "US dollars ($)"}
+IBKR_EXCHANGES = {".TO": "TSE (Toronto)", ".V": "VENTURE (TSX Venture)", ".NE": "NEO (Cboe Canada)",
+                  ".CN": "CSE (Canadian Securities Exchange)"}
+
+
+def ibkr_contract(sym, currency):
+    """RCI.B.TO -> 'RCI.B on exchange TSE (Toronto), currency CAD' (IBKR drops Yahoo's suffix)."""
+    s = str(sym or "").strip().upper()
+    for suf, exch in IBKR_EXCHANGES.items():
+        if s.endswith(suf):
+            return "%s on exchange %s, currency %s (not %s)" % (s[:-len(suf)].replace("-", "."), exch, currency, s)
+    return None
+
+
+def _money(v, currency=None):
+    """$ for US dollars, C$ for Canadian, else the code in front."""
+    prefix = {None: "$", "": "$", "USD": "$", "CAD": "C$"}.get(currency, (currency or "") + " ")
     f = float(v)
     s = "{:,.2f}".format(f)
-    return "$" + (s[:-3] if s.endswith(".00") else s)
+    return prefix + (s[:-3] if s.endswith(".00") else s)
 
 
 def _p(v):
@@ -217,6 +261,7 @@ def plain_parts(order):
     sym = order.get("symbol", "?")
     typ = str(order.get("type", "market"))
     tif = TIF_WORDS.get(str(order.get("time_in_force", "day")), order.get("time_in_force"))
+    cur = currency_of(order)
     if is_bracket(order):
         how = "limit %s" % _p(order["limit_price"]) if typ == "limit" and order.get("limit_price") else typ
         parts = ["%s %s %s, %s, %s" % (side, _str_num(order.get("qty")), sym, how, tif)]
@@ -230,19 +275,19 @@ def plain_parts(order):
         loss, stop = max_loss(order)
         if loss is not None:
             parts.append("max loss about %s if the stop fills at %s (it can fill worse in a fast market)"
-                         % (_money(loss), _p(stop)))
+                         % (_money(loss, cur), _p(stop)))
         return parts
     if order.get("notional") is not None:
-        what = "%s of %s" % (_money(order["notional"]), sym)
+        what = "%s of %s" % (_money(order["notional"], cur), sym)
     else:
         q = _str_num(order.get("qty"))
         what = "%s share%s of %s" % (q, "" if q == "1" else "s", sym)
     if typ == "limit":
-        how = "limit order at %s" % _money(order.get("limit_price"))
+        how = "limit order at %s" % _money(order.get("limit_price"), cur)
     elif typ == "stop":
-        how = "stop order at %s" % _money(order.get("stop_price"))
+        how = "stop order at %s" % _money(order.get("stop_price"), cur)
     elif typ == "stop_limit":
-        how = "stop %s, limit %s" % (_money(order.get("stop_price")), _money(order.get("limit_price")))
+        how = "stop %s, limit %s" % (_money(order.get("stop_price"), cur), _money(order.get("limit_price"), cur))
     else:
         how = "%s order" % typ.replace("_", " ")
     return ["%s %s, %s, %s" % (side, what, how, tif)]
@@ -283,9 +328,12 @@ def parse_yes(reply, order, batch_symbols=()):
     if DOUBT_WORDS & set(words[1:]):
         return False, "the reply has a condition or a doubt in it; ask again"
     sym = str(order.get("symbol", "")).upper()
-    tokens = set(re.findall(r"[A-Z][A-Z.\-]{0,6}", raw.upper()))
-    others = {s.upper() for s in batch_symbols} - {sym}
-    named = tokens & others
+    def norm(t):   # RCI-B.TO and RCI.B.TO are the same listing
+        return t.replace("-", ".")
+
+    tokens = {norm(t) for t in SYMBOL_TOKEN.findall(raw.upper())}
+    others = {s.upper() for s in batch_symbols if norm(s.upper()) != norm(sym)}
+    named = {s for s in others if norm(s) in tokens}
     if named:
         return False, "the reply names %s, but this order is for %s" % (", ".join(sorted(named)), sym)
     nums = [float(n.replace(",", "")) for n in re.findall(r"\d[\d,]*(?:\.\d+)?", raw)]
@@ -323,9 +371,22 @@ def risk_verdict(risk, fp, today):
     return None, "this exact order was not in the last risk check (it changed or is new); run check.py again"
 
 
-def status_of(order, risk, state, today):
-    """(ready, label, risk_result)"""
+def broker_block(order, cfg):
+    """Why this broker cannot take this order at all, or None."""
+    broker = str((cfg or {}).get("broker") or "alpaca").lower()
+    if broker == "alpaca" and is_canadian(order.get("symbol")):
+        return ("Alpaca does not trade Canadian listings (%s); use Interactive Brokers "
+                "(\"broker\": \"ibkr\" in trader/config.json, Setup B)" % str(order.get("symbol")).upper())
+    return None
+
+
+def status_of(order, risk, state, today, cfg=None):
+    """(ready, label, risk_result). With cfg, an order the broker cannot take is never ready."""
     fp = fingerprint(order)
+    why_not = broker_block(order, cfg) if cfg is not None else None
+    if why_not:
+        rv, _ = risk_verdict(risk, fp, today)
+        return False, "NOT READY: " + why_not, rv
     rv, why = risk_verdict(risk, fp, today)
     if rv is None:
         return False, "NOT READY: " + why, None
@@ -350,7 +411,7 @@ def kind_of(order, rv):
 # ---------------------------------------------------------------- rendering
 
 def render(order, idx, total, cfg, risk, state, today):
-    ready, label, rv = status_of(order, risk, state, today)
+    ready, label, rv = status_of(order, risk, state, today, cfg)
     broker = str(cfg.get("broker", "alpaca")).lower()
     paper = cfg.get("paper", True)
     acct = "PAPER account" if paper else "LIVE ACCOUNT, REAL MONEY"
@@ -359,12 +420,18 @@ def render(order, idx, total, cfg, risk, state, today):
         lines.append("  " + part)
     if order.get("why"):
         lines.append("  why: " + order["why"])
+    cur = currency_of(order)
+    if cur != "USD":
+        lines.append("  amounts in %s" % CURRENCY_WORDS.get(cur, cur))
     lines.append("  " + label)
     for w in (rv or {}).get("warnings", []):
         lines.append("  note: " + w)
     if broker == "ibkr":
         lines.append("  Claude drafts this with the Interactive Brokers connector. IBKR sends it to your")
         lines.append("  IBKR account, and it only goes to the market after you approve it there.")
+        contract = ibkr_contract(order.get("symbol"), cur)
+        if contract:
+            lines.append("  At IBKR this is " + contract + ".")
     else:
         lines.append("  Claude will call place_stock_order with exactly:")
         for l in json.dumps(tool_input(order), indent=2).splitlines():
@@ -380,13 +447,16 @@ def render(order, idx, total, cfg, risk, state, today):
 
 
 def ticket_json(order, idx, cfg, risk, state, today):
-    ready, label, rv = status_of(order, risk, state, today)
+    ready, label, rv = status_of(order, risk, state, today, cfg)
     loss, stop = max_loss(order)
-    return {"index": idx, "ready": ready, "status": label, "plain": plain(order),
+    out = {"index": idx, "ready": ready, "status": label, "plain": plain(order),
             "fingerprint": fingerprint(order), "paper": bool(cfg.get("paper", True)),
             "broker": cfg.get("broker", "alpaca"), "tool": "place_stock_order",
             "tool_input": tool_input(order), "why": order.get("why", ""),
             "bracket": is_bracket(order), "max_loss": loss, "stop": stop}
+    if currency_of(order) != "USD":
+        out["currency"] = currency_of(order)
+    return out
 
 
 # ---------------------------------------------------------------- fills -> portfolio
@@ -500,7 +570,7 @@ def cmd_show(a):
 def cmd_approve(a):
     orders, cfg, risk, state, today, now = _load(a)
     order = _pick(orders, a.index)
-    ready, label, rv = status_of(order, risk, state, today)
+    ready, label, rv = status_of(order, risk, state, today, cfg)
     if not ready:
         raise TicketError("order %d is not ready: %s" % (a.index, label))
     ok, why = parse_yes(a.reply, order, [o.get("symbol", "") for o in orders])
@@ -513,6 +583,8 @@ def cmd_approve(a):
            "qty": order.get("qty"), "kind": kind_of(order, rv), "max_loss": loss, "stop": stop,
            "plain": plain(order), "status": "approved", "reply": a.reply,
            "paper": bool(cfg.get("paper", True)), "broker": cfg.get("broker", "alpaca")}
+    if currency_of(order) != "USD":
+        rec["currency"] = currency_of(order)
     state.setdefault("orders", []).append(rec)
     write_json(a.state, state)
     print("Recorded your yes for order %d: %s." % (a.index, plain(order)))
@@ -547,7 +619,7 @@ def cmd_result(a):
         raise TicketError("order %d has no yes recorded today; a result can only follow an approval" % a.index)
     new = {"at": ny_iso(now), "date": today, "index": a.index, "fingerprint": fp, "symbol": rec["symbol"],
            "side": rec["side"], "plain": rec["plain"], "status": a.status}
-    for k in ("qty", "kind", "max_loss", "stop"):
+    for k in ("qty", "kind", "max_loss", "stop", "currency"):
         if rec.get(k) is not None:
             new[k] = rec[k]
     if a.broker_id:
@@ -638,7 +710,7 @@ def cmd_log(a):
     for r in rows:
         extra = (" id " + r["broker_order_id"]) if r.get("broker_order_id") else ""
         reply = (' reply "%s"' % r["reply"]) if r.get("reply") and r["status"] in ("approved", "declined") else ""
-        loss = (" max loss %s" % _money(r["max_loss"])) if r.get("max_loss") is not None and r["status"] == "placed" else ""
+        loss = (" max loss %s" % _money(r["max_loss"], r.get("currency"))) if r.get("max_loss") is not None and r["status"] == "placed" else ""
         idx = ("#%s" % r["index"]) if r.get("index") is not None else "  "
         print("%s  %s %-9s %s%s%s%s" % (r.get("at"), idx, r.get("status"), r.get("plain"), reply, loss, extra))
     placed = sum(1 for r in rows if r.get("status") == "placed")

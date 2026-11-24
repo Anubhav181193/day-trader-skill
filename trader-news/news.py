@@ -7,6 +7,7 @@ stock has moved today and a flag on anything that touches your tickers.
 
     python3 news.py                                  # watchlist + plan + portfolio tickers
     python3 news.py --tickers TSLA NVDA AMD
+    python3 news.py --tickers RY.TO,SHOP.TO          # Canadian listings (TSX .TO, TSX Venture .V)
     python3 news.py --tickers TSLA --all --hours 72  # everything in the last 3 days, seen or not
     python3 news.py --no-sec                         # headlines only
     python3 news.py --no-moves                       # skip the price line per ticker
@@ -24,6 +25,13 @@ Sources, one request each per ticker:
     SEC needs a User-Agent with your name and email (sec_user_agent in
     trader/config.json or SEC_USER_AGENT). Without one the SEC part is skipped
     and the tool says so; headlines still run.
+
+  Canadian listings (RY.TO, RCI.B.TO, ABC.V): Yahoo's symbol keeps the
+  exchange suffix (RCI.B.TO -> RCI-B.TO) and the headline feed uses
+  region=CA&lang=en-CA, which carries more Canadian sources (Financial Post,
+  ca.finance.yahoo.com) and fresher stories than the US feed. SEC filings do
+  not cover Canadian issuers: their filings are on SEDAR+ (sedarplus.ca),
+  which this tool does not read, so SEC is skipped for them.
 
   - The move: Yahoo Finance's chart endpoint (unofficial, can lag), the last
     price against yesterday's close:
@@ -53,6 +61,14 @@ import urllib.request
 import xml.etree.ElementTree as ET
 
 YAHOO = "https://feeds.finance.yahoo.com/rss/2.0/headline?s=%s&region=US&lang=en-US"
+YAHOO_CA = "https://feeds.finance.yahoo.com/rss/2.0/headline?s=%s&region=CA&lang=en-CA"
+# Yahoo suffixes for Canadian listings: Toronto, TSX Venture, Cboe Canada, CSE
+CA_SUFFIXES = (".TO", ".V", ".NE", ".CN")
+# US class shares whose class letter is V look like TSX Venture tickers. They stay US
+# (Nasdaq Trader's lists, read 2026-11-23): MKC.V is McCormick's voting stock on the NYSE.
+US_DOT_V = ("MKC.V",)
+SEDAR_NOTE = ("SEC filings skipped for %s: Canadian issuers file on SEDAR+ (sedarplus.ca), "
+              "which this tool does not read")
 CHART = "https://%s.finance.yahoo.com/v8/finance/chart/%s?range=1d&interval=5m"
 SEC_FEED = ("https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=%s&type=%s"
             "&dateb=&owner=include&count=%d&output=atom")
@@ -191,8 +207,22 @@ class Fetcher(object):
             raise NewsError("could not reach %s: %s" % (url, exc.reason))
 
 
+def is_canadian(ticker):
+    s = (ticker or "").upper()
+    return s.endswith(CA_SUFFIXES) and s.replace("-", ".") not in US_DOT_V
+
+
 def yahoo_symbol(ticker):
-    return ticker.upper().replace(".", "-")
+    """BRK.B -> BRK-B; a Canadian listing keeps its exchange suffix: RCI.B.TO -> RCI-B.TO."""
+    s = ticker.upper()
+    for suf in CA_SUFFIXES:
+        if s.endswith(suf) and s.replace("-", ".") not in US_DOT_V:
+            return s[:-len(suf)].replace(".", "-") + suf
+    return s.replace(".", "-")
+
+
+def headline_url(ticker):
+    return (YAHOO_CA if is_canadian(ticker) else YAHOO) % yahoo_symbol(ticker)
 
 
 def cik_map(fetcher, state):
@@ -329,6 +359,9 @@ def mention_patterns(watch):
     for t, name in watch.items():
         alts = [r"\(%s\)" % re.escape(t), r"\$%s\b" % re.escape(t),
                 r"\b(?:NYSE|NASDAQ|Nasdaq)\s*:\s*%s\b" % re.escape(t)]
+        if is_canadian(t):   # Canadian stories write (TSX:RY) or (TSXV: ABC), without Yahoo's suffix
+            base = re.escape(t.rsplit(".", 1)[0]).replace(r"\.", r"[.\-]")
+            alts.append(r"\b(?:TSX|TSXV|TSX-V|TSX Venture|CSE|NEO)\s*:\s*%s(?!\w|[.\-]\w)" % base)
         if name and len(name) >= 4:
             alts.append(r"\b%s\b" % re.escape(name).replace(r"\ ", r"[\s-]"))
         pats[t] = re.compile("|".join(alts))
@@ -383,16 +416,20 @@ def collect(fetcher, watch, state, sec=True, forms=("8-K",), count=10, errors=No
     items = []
     for t in sorted(watch):
         try:
-            items += parse_rss(fetcher.get(YAHOO % yahoo_symbol(t), "yahoo-%s.xml" % t), t)
+            items += parse_rss(fetcher.get(headline_url(t), "yahoo-%s.xml" % t), t)
         except NewsError as exc:
             errors.append("headlines for %s: %s" % (t, exc))
-    if sec:
+    canadian = sorted(t for t in watch if is_canadian(t))
+    if sec and canadian:
+        errors.append(SEDAR_NOTE % ", ".join(canadian))
+    us = [t for t in sorted(watch) if not is_canadian(t)]
+    if sec and us:
         try:
             ciks = cik_map(fetcher, state)
         except NewsError as exc:
             errors.append("SEC ticker list: %s" % exc)
             ciks = {}
-        for t in sorted(watch):
+        for t in us:
             cik = ciks.get(t)
             if not cik:
                 if ciks:
@@ -437,11 +474,12 @@ def remember(items, state, now):
 
 def render_moves(moves, move_pct=MOVE_PCT):
     out = []
+    w = max([6] + [len(m["ticker"]) for m in moves])   # RCI.B.TO is longer than a US ticker
     for m in moves:
         flag = "MOVING" if abs(m["pct"]) >= move_pct else ""
         when = (" at %s ET" % to_eastern(m["time"]).strftime("%H:%M")) if m.get("time") else ""
-        out.append("%-6s %s %+.2f%% vs yesterday's close %s%s  %s" % (
-            m["ticker"], "{:,.2f}".format(m["price"]), m["pct"], "{:,.2f}".format(m["prev_close"]),
+        out.append("%-*s %s %+.2f%% vs yesterday's close %s%s  %s" % (
+            w, m["ticker"], "{:,.2f}".format(m["price"]), m["pct"], "{:,.2f}".format(m["prev_close"]),
             when, flag))
     return out
 
@@ -500,7 +538,8 @@ def main(argv=None):
     args = ap.parse_args(argv)
 
     if args.tickers:
-        watch = {t.upper(): None for t in args.tickers}
+        tickers = [t for arg in args.tickers for t in arg.split(",") if t.strip()]   # RY.TO,SHOP.TO works too
+        watch = {t.strip().upper(): None for t in tickers}
         known = watch_from_files(args.portfolio, args.watchlist, args.plan)
         watch.update({t: known[t] for t in watch if known.get(t)})
     else:
@@ -514,10 +553,13 @@ def main(argv=None):
     errors = []
     ua = sec_user_agent(args.user_agent, args.config)
     sec = not args.no_sec
-    if sec and not ua and not args.offline:
+    if sec and not ua and not args.offline and any(not is_canadian(t) for t in watch):
         errors.append("SEC filings skipped: set sec_user_agent in trader/config.json or "
                       "SEC_USER_AGENT (\"Your Name you@example.com\") to include them")
         sec = False
+        canadian = sorted(t for t in watch if is_canadian(t))
+        if canadian:
+            errors.append(SEDAR_NOTE % ", ".join(canadian))
     fetcher = Fetcher(ua, offline=args.offline)
     forms = [f.strip().upper() for f in args.forms.split(",") if f.strip()]
     items = collect(fetcher, watch, state, sec=sec, forms=forms, errors=errors)

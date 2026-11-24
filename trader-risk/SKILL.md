@@ -62,7 +62,9 @@ batch that is fine order by order but breaks a limit together is caught.
 | check | blocks when |
 | --- | --- |
 | format | no symbol, side not buy or sell, both or neither of qty and notional, a notional order that is not market + day (Alpaca's rule), a limit order with no limit price; a bracket that is not whole shares, not `day` or `gtc`, or misses its stop-loss or take-profit |
-| asset | an option symbol while `allow_options` is false; crypto or anything that is not a US stock or ETF ticker |
+| asset | an option symbol while `allow_options` is false; crypto or anything that is not a US stock or ETF ticker or a Canadian listing (`RY.TO`, `RCI.B.TO`, `ABC.V`) |
+| broker | a Canadian listing while `broker` is `alpaca` (the default): Alpaca trades US listings only; Interactive Brokers (`"broker": "ibkr"`) can |
+| currency | (entries) the order's currency (`currency` on the order or its plan; absent = USD, a `.TO` / `.V` symbol without one = CAD) is not your `account_currency` (default USD). No currency conversion is tried |
 | short | a sell of more than you hold (`allow_short` false) |
 | blocked | (entries) the ticker is on the `blocked` list |
 | size | (entries) under `min_order_usd` or over `max_order_usd` |
@@ -90,7 +92,15 @@ How the numbers work:
 - **The window** is New York time, worked out in the tool (daylight saving
   included), never from the computer's clock zone. Weekends and NYSE holidays
   are closed. On a 1:00 p.m. early close the window ends 3 hours earlier too.
-  Set both `no_entries_*` to null to switch the window off.
+  Set both `no_entries_*` to null to switch the window off. A Canadian
+  listing uses the TSX calendar instead: the same 9:30 to 4:00 hours, but
+  Canadian holidays (Canada Day July 1 is closed for RY.TO and open for AAPL;
+  US Thanksgiving is open for RY.TO).
+- **Currency.** Every limit (`max_loss_per_trade_usd`, `max_daily_loss_usd`,
+  `max_order_usd`, the cash) is in `account_currency`, despite the `_usd` in
+  the names. A Canadian-dollar account (IBKR in CAD): set
+  `"account_currency": "CAD"` and the amounts print as C$. A CAD order
+  against a USD account is blocked with a plain reason, never converted.
 - **pdt_guard** (off by default) counts a day trade as a symbol bought and
   sold on the same day in the log, plus any entry placed today (it is meant
   to be flat by the close). FINRA removed the $25,000 pattern-day-trader

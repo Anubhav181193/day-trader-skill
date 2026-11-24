@@ -55,7 +55,8 @@ bars), `--offline FILE` (a saved Yahoo chart JSON, `.json` or `.json.gz`),
 
 1. **The pool.** It keeps only FULL sessions before the plan's date: all 78
    five-minute bars, 9:30 to 4:00 New York time. Half days, gaps and today
-   are left out. Every bar becomes four ratios to the bar before it:
+   are left out, and so is any day the stock's own exchange was closed (the
+   NYSE calendar for US tickers, the TSX one for Canadian). Every bar becomes four ratios to the bar before it:
    open, high, low and close over the previous close.
 2. **One replay.** Start at the entry price. For each bar left in the day,
    pick a past bar from the same time of day (plus or minus 2 bars) at
@@ -63,7 +64,7 @@ bars), `--offline FILE` (a saved Yahoo chart JSON, `.json` or `.json.gz`),
    first, then the target. A bar that touches both counts as the stop.
 3. **10,000 replays** give four odds. Target first. Stop first. Neither,
    which means the trade was still open at `--until` (default 4:00 PM, the
-   close, or 1:00 PM on an NYSE early-close day). Green, which means target
+   close, or 1:00 PM on an early-close day of the stock's exchange). Green, which means target
    first or above the entry at `--until`.
    R is +1 at a 1R target, -1 at the stop, and otherwise the distance from
    the entry at `--until` divided by the risk. A gap through the stop still
@@ -95,6 +96,17 @@ plain line, when there are fewer than 20 full sessions, when the entry bar is
 not in the data (wrong date, not closed yet, a future day), or when the plan
 does not make sense (a stop above a buy's entry, an entry off the 5-minute
 grid). A live in-progress bar is never used.
+
+**Canadian stocks.** TSX and TSX Venture tickers work the same way:
+`--symbol RY.TO`, `RCI.B.TO`, `REI.UN.TO`, `ABC.V`. They go to Yahoo with the
+suffix kept (`RCI.B.TO` is asked for as `RCI-B.TO`). Same 9:30 to 4:00 New
+York hours, but the TSX calendar: closed on Canada Day, Family Day, Victoria
+Day, Civic Holiday, Canadian Thanksgiving (Oct 12, 2026) and Boxing Day, open
+on US-only holidays like US Thanksgiving; 1:00 PM close on Christmas Eve only.
+A plan on a day the exchange is closed is refused, and the report lists the
+closed days it left out of the pool. Yahoo prices them in Canadian dollars:
+the report prints C$ and the JSON has `data.currency: "CAD"` (US results carry
+no currency field).
 
 ## Steps
 

@@ -39,6 +39,7 @@ python3 "${CLAUDE_SKILL_DIR}/news.py" --no-sec --json
 | Yahoo Finance headline RSS | `https://feeds.finance.yahoo.com/rss/2.0/headline?s=TSLA&region=US&lang=en-US` |
 | Yahoo Finance chart endpoint | the last price against yesterday's close (unofficial, can lag) |
 | SEC EDGAR company Atom feed | 8-K by default (`--forms 8-K,10-Q` for more); needs `sec_user_agent` in `trader/config.json` or `SEC_USER_AGENT`, else filings are skipped with a note |
+| Canadian listings | `--tickers RY.TO,SHOP.TO` (TSX `.TO`, TSX Venture `.V`). Yahoo keeps the suffix (`RCI.B.TO` is `RCI-B.TO`) and the headlines come from the `region=CA&lang=en-CA` feed, which has more Canadian sources and fresher stories than the US one. No SEC filings for them: Canadian issuers file on SEDAR+ (sedarplus.ca), which this tool does not read; it says so in a note |
 | `trader/state/news.json` | what has been shown (kept 30 days) and each ticker's CIK |
 
 ## The rules
@@ -47,7 +48,9 @@ python3 "${CLAUDE_SKILL_DIR}/news.py" --no-sec --json
   happened, open the story or the filing and read it. Quote the source and
   link it. Never summarise a paywalled story you could not read: say so.
 - **Filings beat headlines.** If an 8-K and a headline disagree, the 8-K is
-  what the company told the SEC.
+  what the company told the SEC. For a Canadian company there is no 8-K
+  here: say that its filings are on SEDAR+ (sedarplus.ca) and that you did
+  not read them, rather than implying nothing was filed.
 - **Say what it touches.** Every item lists the tickers it touches and its
   tags: earnings, analyst, legal, deal, capital, people, risk, halt,
   regulatory, macro. Filings marked `!` carry an important 8-K item: earnings

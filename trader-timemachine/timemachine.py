@@ -17,7 +17,9 @@ session in the data.
 How the replays work (the reel's sim.py, same algorithm, same random draws):
   1. Fetch 60 days of 5-minute bars (Yahoo v8 chart, range=60d interval=5m;
      one request). Keep only FULL sessions before the plan's date: 78 bars,
-     9:30 to 4:00 New York time. Half days, gaps and today are left out.
+     9:30 to 4:00 New York time. Half days, gaps and today are left out, and
+     so is any day the symbol's own exchange was closed (NYSE for US tickers,
+     TSX for Canadian ones: .TO .V .NE .CN).
   2. The pool: for every bar slot 1..77 of the day, each past session's bar as
      ratios to the previous bar's close: (open, high, low, close) / prev close.
   3. One replay starts at the entry price and walks the rest of the session.
@@ -27,7 +29,7 @@ How the replays work (the reel's sim.py, same algorithm, same random draws):
      so a bar that touches both counts as the stop (the conservative call).
   4. Outcomes: "target" or "stop" (whichever was touched first), or "neither"
      when the trade is still open at --until (default 16:00, the close, or
-     13:00 on an NYSE early-close day).
+     13:00 on an early-close day of the symbol's exchange: NYSE or TSX).
      "green" = target first, or above the entry at --until (below for a sell).
      R = the target's R at the target, -1 at the stop, otherwise
      (price at --until - entry) / risk. A gap through the stop still counts
@@ -61,6 +63,12 @@ Data: https://query2.finance.yahoo.com/v8/finance/chart/<T>?range=60d&interval=5
 (unofficial and free, can lag; falls back to query1 on 429 or 5xx).
 --offline FILE reads a saved chart JSON (.json or .json.gz) instead.
 Times are New York (ET) wall-clock; --now "2026-10-19 10:15" pins the clock.
+
+Canadian listings (RY.TO, RCI.B.TO, REI.UN.TO, ABC.V) use the TSX calendar
+(same 9:30 to 4:00 New York hours, its own holidays, 1:00 p.m. on Christmas
+Eve) and go to Yahoo with the suffix kept: RCI.B.TO -> RCI-B.TO. When Yahoo
+says the prices are not US dollars (meta.currency CAD), the report prints C$
+and the JSON carries data.currency; US results are unchanged.
 """
 
 import argparse
@@ -102,6 +110,64 @@ NYSE_EARLY_CLOSE = {  # 1:00 p.m. ET, from https://www.nyse.com/markets/hours-ca
     "2027-11-26": "day after Thanksgiving",
 }
 EARLY_MIN = 13 * 60
+NYSE_HOLIDAYS = {  # from https://www.nyse.com/markets/hours-calendars (read 2026-10-13)
+    "2026-01-01": "New Year's Day",
+    "2026-01-19": "Martin Luther King, Jr. Day",
+    "2026-02-16": "Washington's Birthday",
+    "2026-04-03": "Good Friday",
+    "2026-05-25": "Memorial Day",
+    "2026-06-19": "Juneteenth National Independence Day",
+    "2026-07-03": "Independence Day (observed)",
+    "2026-09-07": "Labor Day",
+    "2026-11-26": "Thanksgiving Day",
+    "2026-12-25": "Christmas Day",
+    "2027-01-01": "New Year's Day",
+    "2027-01-18": "Martin Luther King, Jr. Day",
+    "2027-02-15": "Washington's Birthday",
+    "2027-03-26": "Good Friday",
+    "2027-05-31": "Memorial Day",
+    "2027-06-18": "Juneteenth National Independence Day (observed)",
+    "2027-07-05": "Independence Day (observed)",
+    "2027-09-06": "Labor Day",
+    "2027-11-25": "Thanksgiving Day",
+    "2027-12-24": "Christmas Day (observed)",
+}
+# Toronto Stock Exchange / TSX Venture, from tsx.com's calendar page (checked 2026-11-23).
+# Same hours as New York (9:30 to 4:00 ET); Christmas Eve closes at 1:00 p.m.
+TSX_HOLIDAYS = {
+    "2026-01-01": "New Year's Day",
+    "2026-02-16": "Family Day",
+    "2026-04-03": "Good Friday",
+    "2026-05-18": "Victoria Day",
+    "2026-07-01": "Canada Day",
+    "2026-08-03": "Civic Holiday",
+    "2026-09-07": "Labour Day",
+    "2026-10-12": "Thanksgiving Day",
+    "2026-12-25": "Christmas Day",
+    "2026-12-28": "Boxing Day (observed)",
+    "2027-01-01": "New Year's Day",
+    "2027-02-15": "Family Day",
+    "2027-03-26": "Good Friday",
+    "2027-05-24": "Victoria Day",
+    "2027-07-01": "Canada Day",
+    "2027-08-02": "Civic Holiday",
+    "2027-09-06": "Labour Day",
+    "2027-10-11": "Thanksgiving Day",
+    "2027-12-27": "Christmas Day (observed)",
+    "2027-12-28": "Boxing Day (observed)",
+}
+TSX_EARLY_CLOSE = {  # 1:00 p.m. ET
+    "2026-12-24": "Christmas Eve",
+    "2027-12-24": "Christmas Eve",
+}
+CALENDARS = {"us": ("NYSE", NYSE_HOLIDAYS, NYSE_EARLY_CLOSE), "ca": ("TSX", TSX_HOLIDAYS, TSX_EARLY_CLOSE)}
+# Yahoo suffixes for Canadian listings: Toronto, TSX Venture, Cboe Canada, CSE
+CA_SUFFIXES = (".TO", ".V", ".NE", ".CN")
+# US class shares whose class letter is V look like TSX Venture tickers. They stay US
+# (Nasdaq Trader's lists, read 2026-11-23): MKC.V is McCormick's voting stock on the NYSE.
+US_DOT_V = ("MKC.V",)
+US_TICKER = re.compile(r"^[A-Z][A-Z0-9.\-]{0,9}$")
+CA_TICKER = re.compile(r"^[A-Z0-9]{1,6}(\.[A-Z]{1,2}){0,2}\.(TO|V|NE|CN)$")   # RY.TO RCI.B.TO REI.UN.TO ABC.V
 
 
 class TMError(Exception):
@@ -183,11 +249,61 @@ def clock24(minutes):
     return "%02d:%02d" % divmod(minutes, 60)
 
 
+# ---------------------------------------------------------------- markets (copied from trader-scanner)
+
+def market_of(sym):
+    """'ca' for a Canadian listing (RY.TO, ABC.V), 'us' for everything else."""
+    s = (sym or "").upper()
+    return "ca" if s.endswith(CA_SUFFIXES) and s.replace("-", ".") not in US_DOT_V else "us"
+
+
+def trading_day(d, market="us"):
+    """(is_trading_day, reason). Weekends and the exchange's holiday list (NYSE or TSX)."""
+    if isinstance(d, str):
+        d = datetime.date.fromisoformat(d)
+    if d.weekday() >= 5:
+        return False, "weekend"
+    exch, holidays, _ = CALENDARS[market]
+    name = holidays.get(d.isoformat())
+    if name:
+        return False, "%s holiday: %s" % (exch, name)
+    return True, ""
+
+
+def session_close(d, market="us"):
+    """The close in minutes after midnight New York time (16:00, or 13:00 on an early close),
+    None when the exchange is closed all day. TSX keeps New York's hours."""
+    if isinstance(d, str):
+        d = datetime.date.fromisoformat(d)
+    if not trading_day(d, market)[0]:
+        return None
+    return EARLY_MIN if d.isoformat() in CALENDARS[market][2] else CLOSE_MIN
+
+
+def to_yahoo(sym):
+    s = sym.upper()
+    for suf in CA_SUFFIXES:
+        if s.endswith(suf) and s.replace("-", ".") not in US_DOT_V:   # RCI.B.TO -> RCI-B.TO: keep the exchange suffix
+            return s[:-len(suf)].replace(".", "-") + suf
+    return s.replace(".", "-")
+
+
+def money(x, currency=None):
+    """$ for US dollars, C$ for Canadian, else the code in front."""
+    prefix = {None: "$", "USD": "$", "CAD": "C$"}.get(currency, (currency or "") + " ")
+    return prefix + "{:,.2f}".format(x)
+
+
+def px(x, currency=None):
+    """A price in the report: plain 364.18 for US dollars (as always), C$364.18 for Canadian."""
+    return "%.2f" % x if currency in (None, "USD") else money(x, currency)
+
+
 # ---------------------------------------------------------------- data
 
 def chart_url(sym, host="query2"):
     return "https://%s.finance.yahoo.com/v8/finance/chart/%s?range=60d&interval=5m" % (
-        host, urllib.parse.quote(sym.upper().replace(".", "-")))
+        host, urllib.parse.quote(to_yahoo(sym)))
 
 
 def _sleep(seconds):
@@ -315,14 +431,21 @@ def split_sessions(bars):
     return days
 
 
-def full_sessions(days, before):
+def full_sessions(days, before, market="us", closed=None):
     """Full sessions (all 78 bars) strictly before the plan's date, oldest first,
-    and the short ones that were left out (half days, gaps)."""
+    and the short ones that were left out (half days, gaps). A day the market's
+    exchange was closed (a TSX holiday for RY.TO) is left out too, into `closed`
+    when a list is given."""
     full, short = [], []
     for d in sorted(days):
         if d >= before:
             continue
         s = days[d]
+        ok, why = trading_day(d, market)
+        if not ok:
+            if closed is not None:
+                closed.append({"date": d, "bars": len(s), "reason": why})
+            continue
         if len(s) == SESSION_BARS:
             full.append((d, [s[i] for i in range(SESSION_BARS)]))
         else:
@@ -531,7 +654,7 @@ def load_plan(a, now_utc):
 def normalize_plan(raw, src="flags"):
     """A plan dict (trader/plan.json shape) -> the checked plan the time machine runs."""
     sym = str(raw.get("symbol") or "").strip().upper()
-    if not re.match(r"^[A-Z][A-Z0-9.\-]{0,9}$", sym):
+    if not (US_TICKER.match(sym) or CA_TICKER.match(sym)):
         raise TMError("the plan needs a ticker symbol, got %r" % raw.get("symbol"))
     side = str(raw.get("side") or "buy").lower()
     if side not in ("buy", "sell"):
@@ -686,7 +809,7 @@ def time_machine(text, plan, now_utc, replays=10000, seed=19, window=2, until=No
     result = chart_result(text, sym)
     meta, bars, dropped = parse_bars(result, now_utc)
     msym = str(meta.get("symbol") or "").upper()
-    if msym and msym != sym.replace(".", "-"):
+    if msym and msym != to_yahoo(sym):
         raise TMError("the data is for %s but the plan is for %s" % (msym, sym))
     gran = meta.get("dataGranularity")
     if gran and gran != "5m":
@@ -694,7 +817,9 @@ def time_machine(text, plan, now_utc, replays=10000, seed=19, window=2, until=No
     if not bars:
         raise TMError("no complete 5-minute bars for %s in the data" % sym)
     k = plan["entry_bar"]
-    early = plan["date"] in NYSE_EARLY_CLOSE
+    market = market_of(sym)
+    currency = meta.get("currency")
+    early = plan["date"] in CALENDARS[market][2]
     end_min = EARLY_MIN if early else CLOSE_MIN
     until_min = end_min if until is None else parse_clock(until, "--until")
     if (until_min - OPEN_MIN) % 5 or until_min > end_min:
@@ -704,6 +829,10 @@ def time_machine(text, plan, now_utc, replays=10000, seed=19, window=2, until=No
     if last <= k:
         raise TMError("--until %s leaves nothing to replay after the %s entry" % (clock12(until_min),
                                                                              plan["entry_time"]))
+    ok, why = trading_day(plan["date"], market)
+    if not ok:
+        raise TMError("%s is not a %s trading day (%s): no session to replay for %s"
+                      % (plan["date"], CALENDARS[market][0], why, sym))
     days = split_sessions(bars)
     entry_day = days.get(plan["date"], {})
     if k not in entry_day:
@@ -716,7 +845,8 @@ def time_machine(text, plan, now_utc, replays=10000, seed=19, window=2, until=No
     if not eb["l"] - 0.01 <= plan["entry"] <= eb["h"] + 0.01:
         warn.append("the plan's entry %.2f is outside that bar's range %.2f to %.2f"
                     % (plan["entry"], eb["l"], eb["h"]))
-    sessions, short = full_sessions(days, plan["date"])
+    closed = []
+    sessions, short = full_sessions(days, plan["date"], market, closed)
     if len(sessions) < MIN_SESSIONS:
         raise TMError("only %d full session(s) of %s before %s in the data; the time machine needs at least %d"
                       % (len(sessions), sym, plan["date"], MIN_SESSIONS))
@@ -739,9 +869,12 @@ def time_machine(text, plan, now_utc, replays=10000, seed=19, window=2, until=No
         "created_by": "trader-timemachine",
         "created_at": now_utc.strftime("%Y-%m-%dT%H:%M:%SZ"),
         "source": source,
-        "data": {"symbol": msym or sym, "interval": "5m", "range": "60d",
-                 "last_bar": "%s %s ET" % (last_bar["date"], last_bar["start"]),
-                 "dropped": dropped, "short_sessions_left_out": short},
+        "data": dict({"symbol": msym or sym, "interval": "5m", "range": "60d",
+                      "last_bar": "%s %s ET" % (last_bar["date"], last_bar["start"]),
+                      "dropped": dropped, "short_sessions_left_out": short},
+                     # only when they apply, so a US result is byte-identical to before
+                     **dict(([("currency", currency)] if currency and currency != "USD" else [])
+                            + ([("closed_sessions_left_out", closed)] if closed else []))),
         "plan": plan_out,
         "mc": mc,
         "history": history,
@@ -765,10 +898,11 @@ def report(doc):
     until = clock12(int(m["until"][:2]) * 60 + int(m["until"][3:]))
     wd = WEEKDAYS[datetime.date.fromisoformat(p["date"]).weekday()]
     r = p["target_r"]
+    cur = doc["data"].get("currency")
     lines = [
-        "%s %s, %s %s: entry %.2f at %s (bar %d), stop %.2f, target %.2f (%sR, risk %.2f a share)."
-        % (p["symbol"], p["side"], wd, p["date"], p["entry"], p["entry_time"], p["entry_bar"], p["stop"],
-           p["target"], ("%g" % r), p["risk_per_share"]),
+        "%s %s, %s %s: entry %s at %s (bar %d), stop %s, target %s (%sR, risk %s a share)."
+        % (p["symbol"], p["side"], wd, p["date"], px(p["entry"], cur), p["entry_time"], p["entry_bar"],
+           px(p["stop"], cur), px(p["target"], cur), ("%g" % r), px(p["risk_per_share"], cur)),
         "%s replays of the rest of the session, %s to %s (%d five-minute bars), seed %d."
         % ("{:,}".format(m["replays"]), p["entry_time"], until, m["bars_left"], m["seed"]),
         "Each bar is drawn whole from %s's own 5-min bars at the same time of day (+-%d bars) over its last "
@@ -780,10 +914,10 @@ def report(doc):
         "  green          %-8s target first, or %s the entry at %s" % (pc(m["p_green"]),
                                                                        "above" if long else "below", until),
         "",
-        "  Price at %s: median %.2f, 90 %% of replays between %.2f and %.2f."
-        % (until, m["median_close"], m["p5_close"], m["p95_close"]),
-        "  Average R: %+.3f (R = the %.2f risk: %sR at the target, -1R at the stop)."
-        % (m["avg_R"], p["risk_per_share"], ("+%g" % m["r_at_target"]), ),
+        "  Price at %s: median %s, 90 %% of replays between %s and %s."
+        % (until, px(m["median_close"], cur), px(m["p5_close"], cur), px(m["p95_close"], cur)),
+        "  Average R: %+.3f (R = the %s risk: %sR at the target, -1R at the stop)."
+        % (m["avg_R"], px(p["risk_per_share"], cur), ("+%g" % m["r_at_target"]), ),
         "",
     ]
     if h.get("rule"):
@@ -807,6 +941,10 @@ def report(doc):
         lines.append("Left out %d short session(s) (half days or gaps): %s."
                      % (len(doc["data"]["short_sessions_left_out"]),
                         ", ".join(x["date"] for x in doc["data"]["short_sessions_left_out"])))
+    if doc["data"].get("closed_sessions_left_out"):
+        lines.append("Left out %d day(s) the exchange was closed: %s."
+                     % (len(doc["data"]["closed_sessions_left_out"]),
+                        ", ".join("%s (%s)" % (x["date"], x["reason"]) for x in doc["data"]["closed_sessions_left_out"])))
     lines.append(doc["note"] + " Repeat this run with --seed %d." % m["seed"])
     return lines
 
@@ -836,8 +974,10 @@ def render_chart(doc, height=17):
         marks[row(p["entry"])] = "entry"
     for r in (row(p["target"]), row(p["stop"])):
         grid[r] = ["-" if ch == " " else ch for ch in grid[r]]
-    out = ["%s %s, %s replay paths from the %s entry (seed %d)" % (
-        p["symbol"], p["date"], "{:,}".format(m.get("band_paths", BAND_PATHS)), p["entry_time"], m["seed"])]
+    cur = (doc.get("data") or {}).get("currency")
+    out = ["%s %s, %s replay paths from the %s entry (seed %d)%s" % (
+        p["symbol"], p["date"], "{:,}".format(m.get("band_paths", BAND_PATHS)), p["entry_time"], m["seed"],
+        "" if cur in (None, "USD") else ", prices in %s" % {"CAD": "C$"}.get(cur, cur))]
     for r in range(height):
         label = marks.get(r)
         price = {"target": p["target"], "stop": p["stop"], "entry": p["entry"]}.get(label, hi - r * step)
