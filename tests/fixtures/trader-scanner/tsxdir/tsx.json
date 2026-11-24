@@ -1,0 +1,154 @@
+{
+ "last_updated": 1795427736,
+ "length": 10,
+ "results": [
+  {
+   "symbol": "BTCQ",
+   "name": "3iQ Bitcoin ETF",
+   "instruments": [
+    {
+     "symbol": "BTCQ",
+     "name": "3iQ Bitcoin ETF Un"
+    },
+    {
+     "symbol": "BTCQ.U",
+     "name": "3iQ Bitcoin USF"
+    }
+   ]
+  },
+  {
+   "symbol": "BNK",
+   "name": "Big Banc Split Corp.",
+   "instruments": [
+    {
+     "symbol": "BNK",
+     "name": "Big BancSplt Corp A "
+    },
+    {
+     "symbol": "BNK.PR.A",
+     "name": "Big BancSplt Corp Pr"
+    }
+   ]
+  },
+  {
+   "symbol": "BBD.A",
+   "name": "Bombardier Inc.",
+   "instruments": [
+    {
+     "symbol": "BBD.A",
+     "name": "Bombardier Cl A MV"
+    },
+    {
+     "symbol": "BBD.B",
+     "name": "Bombardier Cl B SV"
+    },
+    {
+     "symbol": "BBD.PR.B",
+     "name": "Bombardier Ser 2 Pr"
+    },
+    {
+     "symbol": "BBD.PR.C",
+     "name": "Bombardier 6.25% Pr"
+    },
+    {
+     "symbol": "BBD.PR.D",
+     "name": "Bombardier Ser 3 Pr"
+    }
+   ]
+  },
+  {
+   "symbol": "CSU",
+   "name": "Constellation Software Inc.",
+   "instruments": [
+    {
+     "symbol": "CSU",
+     "name": "Constellation Softwr"
+    },
+    {
+     "symbol": "CSU.DB",
+     "name": "Constellation Sr1 Db"
+    }
+   ]
+  },
+  {
+   "symbol": "XIU",
+   "name": "iShares S&P/TSX 60 Index ETF",
+   "instruments": [
+    {
+     "symbol": "XIU",
+     "name": "iShares S&P/TSX60 Un"
+    }
+   ]
+  },
+  {
+   "symbol": "REI.UN",
+   "name": "RioCan Real Estate Investment Trust",
+   "instruments": [
+    {
+     "symbol": "REI.UN",
+     "name": "RioCan Rl Est Tr Un"
+    }
+   ]
+  },
+  {
+   "symbol": "ROG",
+   "name": "Roche CDR (CAD Hedged)",
+   "instruments": [
+    {
+     "symbol": "ROG",
+     "name": "Roche CDR CAD Hedge"
+    }
+   ]
+  },
+  {
+   "symbol": "RCI.A",
+   "name": "Rogers Communications Inc.",
+   "instruments": [
+    {
+     "symbol": "RCI.A",
+     "name": "Rogers Comm Cl A"
+    },
+    {
+     "symbol": "RCI.B",
+     "name": "Rogers Comm Cl B NV"
+    }
+   ]
+  },
+  {
+   "symbol": "RY",
+   "name": "Royal Bank of Canada",
+   "instruments": [
+    {
+     "symbol": "RY",
+     "name": "Royal Bank of Canada"
+    },
+    {
+     "symbol": "RY.PR.S",
+     "name": "Royal Bank Pr Ser BO"
+    }
+   ]
+  },
+  {
+   "symbol": "TD",
+   "name": "Toronto-Dominion Bank (The)",
+   "instruments": [
+    {
+     "symbol": "TD",
+     "name": "T.D. Bank"
+    },
+    {
+     "symbol": "TD.PF.A",
+     "name": "T.D. Bank Ser 1 Pr"
+    },
+    {
+     "symbol": "TD.PF.I",
+     "name": "T.D. Bank Ser 16 Pr"
+    },
+    {
+     "symbol": "TD.PF.J",
+     "name": "T.D. Bank Ser 18 Pr"
+    }
+   ]
+  }
+ ]
+}

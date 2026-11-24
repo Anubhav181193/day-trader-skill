@@ -91,6 +91,9 @@ BAR_MIN = 5
 MAX_CONFIRM = 200   # stage-2 v8 charts per orb scan, most traded first
 MIN_DAILY_BARS = 30
 DEFAULT_UNIVERSE = "trader/universe.txt"
+UNIVERSE_FILES = {"us": DEFAULT_UNIVERSE, "ca": "trader/universe-ca.txt"}
+# daily scan volume floors, shares: TSX names trade far fewer shares than US ones
+MIN_VOLUME = {"us": 1000000, "ca": 200000}
 NOTE = "A scan is a list of charts that match a rule, not a list of stocks to buy."
 
 NYSE_HOLIDAYS = {
@@ -120,6 +123,40 @@ NYSE_EARLY_CLOSE = {  # 1:00 p.m. ET
     "2026-12-24": "Christmas Eve",
     "2027-11-26": "day after Thanksgiving",
 }
+# Toronto Stock Exchange / TSX Venture, from tsx.com's calendar page (checked 2026-11-23).
+# Same hours as New York (9:30 to 4:00 ET); Christmas Eve closes at 1:00 p.m.
+TSX_HOLIDAYS = {
+    "2026-01-01": "New Year's Day",
+    "2026-02-16": "Family Day",
+    "2026-04-03": "Good Friday",
+    "2026-05-18": "Victoria Day",
+    "2026-07-01": "Canada Day",
+    "2026-08-03": "Civic Holiday",
+    "2026-09-07": "Labour Day",
+    "2026-10-12": "Thanksgiving Day",
+    "2026-12-25": "Christmas Day",
+    "2026-12-28": "Boxing Day (observed)",
+    "2027-01-01": "New Year's Day",
+    "2027-02-15": "Family Day",
+    "2027-03-26": "Good Friday",
+    "2027-05-24": "Victoria Day",
+    "2027-07-01": "Canada Day",
+    "2027-08-02": "Civic Holiday",
+    "2027-09-06": "Labour Day",
+    "2027-10-11": "Thanksgiving Day",
+    "2027-12-27": "Christmas Day (observed)",
+    "2027-12-28": "Boxing Day (observed)",
+}
+TSX_EARLY_CLOSE = {  # 1:00 p.m. ET
+    "2026-12-24": "Christmas Eve",
+    "2027-12-24": "Christmas Eve",
+}
+CALENDARS = {"us": ("NYSE", NYSE_HOLIDAYS, NYSE_EARLY_CLOSE), "ca": ("TSX", TSX_HOLIDAYS, TSX_EARLY_CLOSE)}
+# Yahoo suffixes for Canadian listings: Toronto, TSX Venture, Cboe Canada, CSE
+CA_SUFFIXES = (".TO", ".V", ".NE", ".CN")
+TSX_URL = "https://www.tsx.com/json/company-directory/search/%s/%%5E*"
+TSX_FILES = (("tsx", ".TO"), ("tsxv", ".V"))
+NOT_A_STOCK = ("ETF", "MUTUALFUND", "INDEX", "CURRENCY", "CRYPTOCURRENCY", "FUTURE", "OPTION")
 CALENDAR_YEARS = (2026, 2027)
 OPEN = datetime.time(9, 30)
 CLOSE = datetime.time(16, 0)
@@ -196,22 +233,34 @@ def parse_hhmm(text, flag="--at"):
     return datetime.time(int(m.group(1)), int(m.group(2)))
 
 
-def trading_day(d):
-    """(is_trading_day, reason). Weekends and the NYSE holiday list."""
+def market_of(sym):
+    """'ca' for a Canadian listing (RY.TO, ABC.V), 'us' for everything else."""
+    s = (sym or "").upper()
+    return "ca" if s.endswith(CA_SUFFIXES) else "us"
+
+
+def markets_of(symbols):
+    return sorted({market_of(s) for s in symbols}) or ["us"]
+
+
+def trading_day(d, market="us"):
+    """(is_trading_day, reason). Weekends and the exchange's holiday list (NYSE or TSX)."""
     if d.weekday() >= 5:
         return False, "weekend"
-    name = NYSE_HOLIDAYS.get(d.isoformat())
+    exch, holidays, _ = CALENDARS[market]
+    name = holidays.get(d.isoformat())
     if name:
-        return False, "NYSE holiday: " + name
+        return False, "%s holiday: %s" % (exch, name)
     return True, ""
 
 
-def session(d):
-    """(open_time, close_time) in New York time, or None if closed all day."""
-    ok, _ = trading_day(d)
+def session(d, market="us"):
+    """(open_time, close_time) in New York time, or None if closed all day.
+    TSX keeps New York's hours, so only the holidays differ."""
+    ok, _ = trading_day(d, market)
     if not ok:
         return None
-    return OPEN, (EARLY if d.isoformat() in NYSE_EARLY_CLOSE else CLOSE)
+    return OPEN, (EARLY if d.isoformat() in CALENDARS[market][2] else CLOSE)
 
 
 def clock_label(t):
@@ -268,7 +317,11 @@ def yahoo_get(path):
 
 
 def to_yahoo(sym):
-    return sym.upper().replace(".", "-")
+    s = sym.upper()
+    for suf in CA_SUFFIXES:
+        if s.endswith(suf):   # RCI.B.TO -> RCI-B.TO: keep the exchange suffix
+            return s[:-len(suf)].replace(".", "-") + suf
+    return s.replace(".", "-")
 
 
 def spark_path(symbols, rng, interval):
@@ -480,6 +533,60 @@ def build_universe(texts):
     return sorted(kept.items()), counts, created
 
 
+# TSX / TSXV company directory. A listing is kept when:
+#   1. its symbol is a plain share: 1 to 6 letters or digits, optionally one class
+#      (.A .B .C) or trust units (.UN). Out: .U (priced in US dollars), .PR / .PF
+#      (preferred), .DB (debentures), .WT (warrants), .NT (notes), .P (TSXV capital
+#      pool shells), and fund series (.F .L and the rest)
+#   2. the company name is not a fund: ETF, fund, index, portfolio, CDR, split
+#      shares. Yahoo's instrumentType catches the rest at scan time.
+CA_SYMBOL = re.compile(r"^[A-Z0-9]{1,6}(\.(A|B|C|UN))?$")
+CA_FUND = re.compile(r"\betfs?\b|\bfunds?\b|\bindex\b|\bportfolios?\b|\bcdrs?\b|\bsplit\b"
+                     r"|\bcovered call\b|\bhedged\b|\btracker\b|\bclass [a-z] units?\b")
+
+
+def classify_ca(sym, company):
+    if sym.endswith(".U") or ".U." in sym:
+        return "priced in US dollars (.U)"
+    if re.search(r"\.(PR|PF)(\.|$)", sym):
+        return "preferred"
+    if re.search(r"\.DB(\.|$)", sym):
+        return "debenture"
+    if re.search(r"\.WT(\.|$)", sym):
+        return "warrant"
+    if sym.endswith(".P"):
+        return "capital pool shell (.P)"
+    if not CA_SYMBOL.match(sym):
+        return "not a plain share"
+    if CA_FUND.search(" ".join((company or "").lower().split())):
+        return "fund or ETF"
+    return "keep"
+
+
+def build_universe_ca(docs):
+    """{'tsx': json, 'tsxv': json} -> (kept [(SYM.TO, name)], counts, updated)."""
+    kept, counts, updated = {}, {}, None
+    for key, suffix in TSX_FILES:
+        doc = docs.get(key)
+        if not isinstance(doc, dict) or not isinstance(doc.get("results"), list):
+            raise ScanError("missing or unreadable %s company directory" % key.upper())
+        if doc.get("last_updated"):
+            u = ts_to_eastern(doc["last_updated"]).strftime("%Y-%m-%d %H:%M")
+            updated = max(updated or u, u)
+        for r in doc["results"]:
+            company = " ".join((r.get("name") or "").split())
+            for ins in r.get("instruments") or [{"symbol": r.get("symbol"), "name": company}]:
+                sym = (ins.get("symbol") or "").strip().upper()
+                if not sym:
+                    continue
+                counts["rows"] = counts.get("rows", 0) + 1
+                why = classify_ca(sym, company)
+                counts[why] = counts.get(why, 0) + 1
+                if why == "keep":
+                    kept[sym + suffix] = company
+    return sorted(kept.items()), counts, updated
+
+
 # ---------------------------------------------------------------- daily setups
 
 def rsi(closes, n=14):
@@ -495,12 +602,12 @@ def rsi(closes, n=14):
     return 100 - 100 / (1 + ag / al) if al else 100.0
 
 
-def daily_closes(series, now_utc):
+def daily_closes(series, now_utc, market="us"):
     """[(date, close)] of COMPLETE daily bars: null closes dropped, today's bar dropped
     until the session closes, anything dated after the clock dropped."""
     now = to_eastern(now_utc)
     today = now.date()
-    s = session(today)
+    s = session(today, market)
     today_done = s is None or now.time() >= s[1]
     out = {}
     for ts, c in zip(series["t"], series["c"]):
@@ -548,13 +655,17 @@ def scan_daily(data, symbols, now_utc, min_price, min_volume):
         if not s:
             continue
         counts["fetched"] += 1
-        bars = daily_closes(s, now_utc)
         meta = s.get("meta") or {}
+        if str(meta.get("instrumentType") or "").upper() in NOT_A_STOCK:
+            counts["not_stock"] = counts.get("not_stock", 0) + 1   # an ETF or fund that slipped into the list
+            continue
+        bars = daily_closes(s, now_utc, market_of(sym))
         price = meta.get("regularMarketPrice")
         if price is None and bars:
             price = bars[-1][1]
         vol = meta.get("regularMarketVolume")
-        if price is None or price < min_price or (min_volume > 0 and (vol is None or vol < min_volume)):
+        floor = min_volume.get(market_of(sym), 0) if isinstance(min_volume, dict) else min_volume
+        if price is None or price < min_price or (floor > 0 and (vol is None or vol < floor)):
             counts["illiquid"] += 1
             continue
         if len(bars) < MIN_DAILY_BARS:
@@ -566,9 +677,13 @@ def scan_daily(data, symbols, now_utc, min_price, min_volume):
         closes = [c for _, c in bars]
         tags, nums = find_setups(closes)
         if tags:
-            hits.append({"symbol": sym, "setups": tags, "price": round(closes[-1], 2),
-                         "close_date": d_last.isoformat(), "rsi": round(nums["rsi"], 1),
-                         "volume": int(vol) if vol is not None else None})
+            hit = {"symbol": sym, "setups": tags, "price": round(closes[-1], 2),
+                   "close_date": d_last.isoformat(), "rsi": round(nums["rsi"], 1),
+                   "volume": int(vol) if vol is not None else None}
+            cur = meta.get("currency")
+            if cur and cur != "USD":
+                hit["currency"] = cur
+            hits.append(hit)
     hits.sort(key=lambda h: (-(h["price"] * (h["volume"] or 0)), h["symbol"]))  # most dollars traded first
     last_date = max(dates, key=lambda d: (dates[d], d)) if dates else None
     counts["hits"] = len(hits)
@@ -581,10 +696,10 @@ def slot(day, k):
     return datetime.datetime.combine(day, OPEN) + datetime.timedelta(minutes=BAR_MIN * k)
 
 
-def session_bars(series, day, cutoff):
+def session_bars(series, day, cutoff, market="us"):
     """5-minute bars of `day` that are complete at `cutoff` (naive New York time),
     on the grid, with a close. Sorted, one per slot."""
-    s = session(day)
+    s = session(day, market)
     close_t = s[1] if s else CLOSE
     out = {}
     hs, ls = series.get("h"), series.get("l")
@@ -607,10 +722,12 @@ def session_bars(series, day, cutoff):
     return [out[k] for k in sorted(out)]
 
 
-def usable(bars, day, cutoff, n_range):
+def usable(bars, day, cutoff, n_range, market="us"):
     """Every slot from 9:30 to the cutoff is there, and at least the range."""
     want = int((cutoff - slot(day, 0)).total_seconds() // (BAR_MIN * 60))
-    s = session(day)
+    s = session(day, market)
+    if s is None:
+        return False   # this symbol's exchange is closed today (a mixed US + Canada list)
     if s:
         want = min(want, int((datetime.datetime.combine(day, s[1]) - slot(day, 0)).total_seconds()
                              // (BAR_MIN * 60)))
@@ -644,17 +761,19 @@ def orb_hit(bars, n_range):
     return None
 
 
-def orb_window(now_utc, at, or_minutes, until, explicit_day=None):
-    """-> (day, cutoff naive ET) or raise ScanError with the plain message."""
+def orb_window(now_utc, at, or_minutes, until, explicit_day=None, markets=("us",)):
+    """-> (day, cutoff naive ET) or raise ScanError with the plain message.
+    With several markets (US and Canada), the day is open if any of them is."""
     now = to_eastern(now_utc)
     day = explicit_day or now.date()
     if or_minutes < BAR_MIN or or_minutes % BAR_MIN or or_minutes > 120:
         raise ScanError("--or-minutes wants a multiple of 5 from 5 to 120 (15 is the classic)")
-    ok, why = trading_day(day)
-    if not ok:
+    open_markets = [m for m in markets if trading_day(day, m)[0]]
+    if not open_markets:
+        why = "; ".join(trading_day(day, m)[1] for m in markets)
         raise ScanError("No session on %s (%s): the market is closed. Run orb on a trading day "
                         "after the opening range, or replay a past day with --offline." % (day_label(day), why))
-    s = session(day)
+    s = max((session(day, m) for m in open_markets), key=lambda x: x[1])
     range_end = slot(day, or_minutes // BAR_MIN)
     first_close = range_end + datetime.timedelta(minutes=BAR_MIN)
     close_dt = datetime.datetime.combine(day, s[1])
@@ -698,8 +817,9 @@ def scan_orb(stage1, symbols, day, cutoff, or_minutes, min_price=0.0, min_volume
         if not s:
             continue
         counts["fetched"] += 1
-        bars = session_bars(s, day, cutoff)
-        if not usable(bars, day, cutoff, n_range):
+        mk = market_of(sym)
+        bars = session_bars(s, day, cutoff, mk)
+        if not usable(bars, day, cutoff, n_range, mk):
             counts["unusable"] += 1
             continue
         vol = sum(b["v"] for b in bars) if s.get("v") else (s.get("meta") or {}).get("regularMarketVolume") or 0
@@ -722,14 +842,18 @@ def scan_orb(stage1, symbols, day, cutoff, or_minutes, min_price=0.0, min_volume
             except ScanError as e:
                 failed[sym] = str(e)
                 continue
-            full = session_bars(s2, day, cutoff)
-            if not usable(full, day, cutoff, n_range):
+            full = session_bars(s2, day, cutoff, market_of(sym))
+            if not usable(full, day, cutoff, n_range, market_of(sym)):
                 failed[sym] = "the v8 chart has a missing bar"
                 continue
         counts["confirmed"] += 1
         h = orb_hit(full, n_range)
         if h:
-            hits.append(dict({"symbol": sym, "setups": ["orb"]}, **h))
+            hit = dict({"symbol": sym, "setups": ["orb"]}, **h)
+            cur = (stage1[sym].get("meta") or {}).get("currency")
+            if cur and cur != "USD":
+                hit["currency"] = cur
+            hits.append(hit)
     hits.sort(key=lambda x: (x["_t"], x["symbol"]))
     for h in hits:
         del h["_t"]
@@ -775,11 +899,19 @@ def read_symbols(a, offline_syms=None):
         syms = symbols_from_file(a.watchlist)
     elif offline_syms is not None and not a.universe:
         syms = sorted(offline_syms)  # offline: every chart in the file, unless a list was given
+    elif a.universe:
+        if not os.path.exists(a.universe):
+            raise ScanError("no %s yet: run `scan.py universe` first, or pass --symbols" % a.universe)
+        syms = symbols_from_file(a.universe)
     else:
-        path = a.universe or DEFAULT_UNIVERSE
-        if not os.path.exists(path):
-            raise ScanError("no %s yet: run `scan.py universe` first, or pass --symbols" % path)
-        syms = symbols_from_file(path)
+        market = getattr(a, "market", None) or "us"
+        syms = []
+        for m in (("us", "ca") if market == "all" else (market,)):
+            path = UNIVERSE_FILES[m]
+            if not os.path.exists(path):
+                raise ScanError("no %s yet: run `scan.py universe%s` first, or pass --symbols"
+                                % (path, "" if m == "us" else " --market ca"))
+            syms += symbols_from_file(path)
     out = []
     for s in syms:
         if s not in out:
@@ -831,13 +963,67 @@ def write_json(path, doc):
         fh.write("\n")
 
 
-def money(x):
-    return "${:,.2f}".format(x)
+def money(x, currency=None):
+    """$ for US dollars, C$ for Canadian, else the code in front."""
+    prefix = {None: "$", "USD": "$", "CAD": "C$"}.get(currency, (currency or "") + " ")
+    return prefix + "{:,.2f}".format(x)
 
 
 # ---------------------------------------------------------------- commands
 
+def cmd_universe_ca(a):
+    t0 = time.time()
+    out = a.out or UNIVERSE_FILES["ca"]
+    docs = {}
+    for k, (key, _) in enumerate(TSX_FILES):
+        if a.offline:
+            p = os.path.join(a.offline, key + ".json")
+            if not os.path.exists(p):
+                raise ScanError("no %s.json in %s" % (key, a.offline))
+            text = _read_maybe_gz(p)
+        else:
+            if k and a.pause:
+                SLEEP(a.pause)
+            try:
+                text = http_get(TSX_URL % key, timeout=60)
+            except urllib.error.HTTPError as e:
+                raise ScanError("tsx.com answered HTTP %d for the %s directory" % (e.code, key.upper()))
+            except (urllib.error.URLError, OSError) as e:
+                raise ScanError("could not reach tsx.com: %s" % getattr(e, "reason", e))
+        try:
+            docs[key] = json.loads(text)
+        except ValueError:
+            raise ScanError("tsx.com's %s directory is not JSON" % key.upper())
+    kept, counts, updated = build_universe_ca(docs)
+    if not a.no_write:
+        d = os.path.dirname(out)
+        if d:
+            os.makedirs(d, exist_ok=True)
+        with open(out, "w", encoding="utf-8") as fh:
+            for sym, name in kept:
+                fh.write("%s|%s\n" % (sym, name))
+    dropped = {k: v for k, v in counts.items() if k not in ("keep", "rows")}
+    if a.json:
+        print(json.dumps({"market": "ca", "count": len(kept), "rows": counts.get("rows", 0),
+                          "updated": updated, "dropped": dropped, "out": None if a.no_write else out,
+                          "seconds": round(time.time() - t0, 1)}, indent=2))
+    else:
+        print("TSX and TSX Venture company directories%s: %s listings." % (
+            (", updated %s ET" % updated) if updated else "", "{:,}".format(counts.get("rows", 0))))
+        print("Kept %s Canadian-dollar shares and trust units (.TO for TSX, .V for TSX Venture)."
+              % "{:,}".format(len(kept)))
+        print("Dropped: " + ", ".join("%s %s" % ("{:,}".format(v), k)
+                                      for k, v in sorted(dropped.items(), key=lambda kv: -kv[1])) + ".")
+        print("Funds the names do not give away are dropped at scan time, from Yahoo's instrument type.")
+        if not a.no_write:
+            print("Wrote %s (one SYMBOL|Name a line)." % out)
+    return 0 if kept else 1
+
+
 def cmd_universe(a):
+    if getattr(a, "market", "us") == "ca":
+        return cmd_universe_ca(a)
+    a.out = a.out or DEFAULT_UNIVERSE
     t0 = time.time()
     texts = {}
     for k, fname in enumerate(NASDAQ_FILES):
@@ -892,12 +1078,15 @@ def cmd_daily(a):
         progress(a, "Fetching daily closes for %s symbols (%d spark requests)..."
                  % ("{:,}".format(len(symbols)), (len(symbols) + SPARK_MAX - 1) // SPARK_MAX))
         data, failed = fetch_spark(symbols, "3mo", "1d", a.pause, a)
-    hits, counts, last_date = scan_daily(data, symbols, now, a.min_price, a.min_volume)
+    markets = markets_of(symbols)
+    min_volume = a.min_volume if a.min_volume is not None else (
+        MIN_VOLUME[markets[0]] if len(markets) == 1 else dict(MIN_VOLUME))
+    hits, counts, last_date = scan_daily(data, symbols, now, a.min_price, min_volume)
     nfailed = len(symbols) - counts["fetched"]
     as_of = ("%s close" % last_date.isoformat()) if last_date else None
     doc = {"created_by": "trader-scanner", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": "daily",
            "as_of": as_of, "universe": len(symbols), "scanned": counts["scanned"], "failed": nfailed,
-           "source": "yahoo", "filters": {"min_price": a.min_price, "min_volume": a.min_volume},
+           "source": "yahoo", "markets": markets, "filters": {"min_price": a.min_price, "min_volume": min_volume},
            "note": NOTE, "hits": hits}
     if a.offline:
         doc["offline"] = os.path.basename(a.offline.rstrip("/"))
@@ -909,11 +1098,15 @@ def cmd_daily(a):
     local = to_eastern(now)
     print("Daily scan, %s ET, closes through %s (Yahoo spark, daily closes only)." % (
         local.strftime("%a %Y-%m-%d %H:%M"), last_date.isoformat() if last_date else "nothing"))
-    print("Fetched %s of %s charts%s. %s passed the liquidity filter ($%s+ and %s+ shares)%s; "
+    vol_txt = ("{:,}".format(min_volume) if not isinstance(min_volume, dict) else
+               " US / ".join("{:,}".format(min_volume[m]) for m in ("us", "ca")) + " Canada")
+    print("Fetched %s of %s charts%s%s. %s passed the liquidity filter ($%s+ and %s+ shares)%s; "
           "%s scanned." % ("{:,}".format(counts["fetched"]), "{:,}".format(len(symbols)),
                            (" (%s failed or had no data)" % "{:,}".format(nfailed)) if nfailed else "",
-                           "{:,}".format(counts["fetched"] - counts["illiquid"]), _n(a.min_price),
-                           "{:,}".format(a.min_volume),
+                           (", %s funds or ETFs skipped" % "{:,}".format(counts["not_stock"]))
+                           if counts.get("not_stock") else "",
+                           "{:,}".format(counts["fetched"] - counts["illiquid"] - counts.get("not_stock", 0)),
+                           _n(a.min_price), vol_txt,
                            (", %d had under %d days" % (counts["short"], MIN_DAILY_BARS)) if counts["short"] else "",
                            "{:,}".format(counts["scanned"])))
     if hits:
@@ -923,8 +1116,9 @@ def cmd_daily(a):
         print("Most traded first (price x volume):")
     else:
         print("No setups.")
+    w = max([6] + [len(h["symbol"]) for h in hits[:a.show]])
     for h in hits[:a.show]:
-        print("  %-6s %10s  RSI %5.1f  %s" % (h["symbol"], money(h["price"]), h["rsi"],
+        print("  %-*s %10s  RSI %5.1f  %s" % (w, h["symbol"], money(h["price"], h.get("currency")), h["rsi"],
                                               ", ".join(LABEL[t] for t in h["setups"])))
     if len(hits) > a.show:
         print("  ... and %d more in the watchlist (--show N for more)." % (len(hits) - a.show))
@@ -957,8 +1151,8 @@ def cmd_orb(a):
                 explicit_day = max(days)
                 if at is None:
                     raise ScanError("offline replay: give --at HH:MM or --now \"YYYY-MM-DD HH:MM\"")
-    day, cutoff = orb_window(now, at, a.or_minutes, until, explicit_day)
     symbols = read_symbols(a, offline_syms)
+    day, cutoff = orb_window(now, at, a.or_minutes, until, explicit_day, markets_of(symbols))
     confirm = None
     if not a.offline:
         today = to_eastern(parse_now(None)).date()
@@ -1010,9 +1204,11 @@ def cmd_orb(a):
         print("%d of %s charts closed above their opening-range high by %s:"
               % (len(hits), ("the %s checked" % "{:,}".format(counts["confirmed"])) if counts["unconfirmed"]
                  else "{:,}".format(counts["scanned"]), clock_label(cutoff)))
+        w = max([6] + [len(h["symbol"]) for h in hits[:a.show]])
         for h in hits[:a.show]:
-            print("  %8s  %-6s %10s  range %s to %s  %+.2f%% over" % (
-                h["at"], h["symbol"], money(h["price"]), _p(h["or_low"]), _p(h["or_high"]), h["pct_over"]))
+            print("  %8s  %-*s %10s  range %s to %s  %+.2f%% over" % (
+                h["at"], w, h["symbol"], money(h["price"], h.get("currency")), _p(h["or_low"]), _p(h["or_high"]),
+                h["pct_over"]))
         if len(hits) > a.show:
             print("  ... and %d more in the watchlist (--show N for more)." % (len(hits) - a.show))
     else:
@@ -1031,9 +1227,13 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="Chart Scanner (trader-scanner): daily setups and opening-range breakouts.")
     sub = ap.add_subparsers(dest="cmd")
 
-    p = sub.add_parser("universe", help="download Nasdaq Trader's lists -> trader/universe.txt")
-    p.add_argument("--out", default=DEFAULT_UNIVERSE)
-    p.add_argument("--offline", metavar="DIR", help="a folder with nasdaqlisted.txt and otherlisted.txt")
+    p = sub.add_parser("universe", help="download the symbol lists -> trader/universe.txt (US) "
+                                        "or trader/universe-ca.txt (--market ca)")
+    p.add_argument("--market", choices=["us", "ca"], default="us",
+                   help="us: Nasdaq Trader's lists; ca: the TSX and TSX Venture directories")
+    p.add_argument("--out", help="default %s, or %s with --market ca" % (DEFAULT_UNIVERSE, UNIVERSE_FILES["ca"]))
+    p.add_argument("--offline", metavar="DIR", help="a folder with nasdaqlisted.txt and otherlisted.txt "
+                                                    "(or tsx.json and tsxv.json with --market ca)")
     p.add_argument("--no-write", action="store_true")
     p.add_argument("--pause", type=float, default=PAUSE)
     p.add_argument("--json", action="store_true")
@@ -1042,7 +1242,10 @@ def main(argv=None):
         g = p.add_mutually_exclusive_group()
         g.add_argument("--symbols", help="comma-separated tickers instead of the universe")
         g.add_argument("--watchlist", metavar="FILE", help="a watchlist.json (hits) or a text file of tickers")
-        p.add_argument("--universe", help="symbol list, one SYMBOL|Name a line (default %s)" % DEFAULT_UNIVERSE)
+        p.add_argument("--universe", help="symbol list, one SYMBOL|Name a line (default: by --market)")
+        p.add_argument("--market", choices=["us", "ca", "all"], default="us",
+                       help="which universe to scan: us (%s), ca (%s) or all (both)"
+                            % (UNIVERSE_FILES["us"], UNIVERSE_FILES["ca"]))
         p.add_argument("--limit", type=int, help="scan only the first N symbols")
         p.add_argument("--min-price", type=float, default=min_price)
         p.add_argument("--min-volume", type=int, default=min_volume)
@@ -1056,7 +1259,7 @@ def main(argv=None):
         p.add_argument("--json", action="store_true")
 
     p = sub.add_parser("daily", help="pre-market setups from daily closes")
-    common(p, 5.0, 1000000)
+    common(p, 5.0, None)   # None: 1,000,000 shares for US names, 200,000 for Canadian ones
     p = sub.add_parser("orb", help="opening-range breakouts so far today")
     common(p, 5.0, 0)
     p.add_argument("--or-minutes", type=int, default=15)
