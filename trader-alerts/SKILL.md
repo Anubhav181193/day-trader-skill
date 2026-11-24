@@ -12,7 +12,8 @@ description: >-
   risk check. Use when the user says "alert me when", "tell me if TSLA hits",
   "watch my stop", "watch my trade", "remind me to close by 3:55", "is the
   market open", "when does the market open", "get me a price", or right
-  after /trader-exit writes a plan.
+  after /trader-exit writes a plan. Canadian tickers (RY.TO, ABC.V) follow
+  the TSX calendar and print in C$.
 argument-hint: "[ticker] [price]"
 ---
 
@@ -28,6 +29,7 @@ user what happened and when it is time to be flat.
 
 ```bash
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" clock                          # NYSE open or closed, next open
+python3 "${CLAUDE_SKILL_DIR}/alerts.py" clock --market ca              # the same for the TSX
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --from-plan                # stop, target, flat by close from trader/plan.json
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --opening-bell
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol TSLA --stop 358.32
@@ -96,6 +98,29 @@ on these holidays, from nyse.com/markets/hours-calendars (read 2026-10-13):
 - 2027: Jan 1, Jan 18, Feb 15, Mar 26 (Good Friday), May 31, Jun 18
   (Juneteenth observed), Jul 5 (Independence Day observed), Sep 6, Nov 25,
   Dec 24 (Christmas observed). Early close 1:00 p.m. on Nov 26.
+
+## Canadian stocks (TSX and TSX Venture)
+
+Tickers with a Canadian suffix (`RY.TO`, `RCI.B.TO`, `REI.UN.TO`, `ABC.V`;
+also `.NE`, `.CN`) are quoted from Yahoo with the suffix kept (`RCI-B.TO`).
+Same 9:30 a.m. to 4:00 p.m. New York hours, but the TSX calendar (tsx.com,
+checked 2026-11-23): closed 2026 Jan 1, Feb 16 (Family Day), Apr 3, May 18
+(Victoria Day), Jul 1 (Canada Day), Aug 3 (Civic Holiday), Sep 7, Oct 12
+(Thanksgiving), Dec 25, Dec 28 (Boxing Day observed); 2027 Jan 1, Feb 15,
+Mar 26, May 24, Jul 1, Aug 2, Sep 6, Oct 11, Dec 27, Dec 28. 1:00 p.m. close
+on Christmas Eve only, so the day after US Thanksgiving is a full day.
+
+- Every rule follows its own symbol's exchange: a RY.TO stop says "last" on
+  Canada Day, a RY.TO "flat by close" still rings at 15:55 on the day after
+  US Thanksgiving, and rings on US Thanksgiving (the TSX is open).
+- A rule with no symbol (`--opening-bell`, a plain `--at`) follows the NYSE;
+  add `--market ca` for the TSX bell (`"market": "ca"` in the rule).
+- `check` adds a `TSX OPEN / closed` line when a Canadian rule is watched.
+- Prices in Canadian dollars print as C$ (`RY.TO is C$121.50: at or below
+  your stop C$122.`); `trader/prices.json` adds `"currency": "CAD"` to their
+  detail (US entries carry no currency field).
+- Stooq has no usable Canadian quotes, so with `--source stooq` a Canadian
+  ticker is still quoted from Yahoo, and the output says so.
 
 Daylight saving time is worked out in the tool, so it needs no time zone
 files and ignores the computer's own zone. For any other year it says the
