@@ -56,6 +56,9 @@ TIF_WORDS = {"day": "good for today", "gtc": "good until canceled", "opg": "at t
 YES_WORDS = ("yes", "y")
 BATCH_WORDS = {"all", "every", "everything", "rest", "remaining", "them", "both", "batch", "each"}
 CA_SUFFIXES = (".TO", ".V", ".NE", ".CN")   # Yahoo suffixes for Canadian listings
+# US class shares whose class letter is V look like TSX Venture tickers. They stay US
+# (Nasdaq Trader's lists, read 2026-11-23): MKC.V is McCormick's voting stock on the NYSE.
+US_DOT_V = ("MKC.V",)
 # a ticker in a reply: TSLA, BRK.B, RY.TO, RCI.B.TO, RCI-B.TO
 SYMBOL_TOKEN = re.compile(r"[A-Z][A-Z0-9]*(?:[.\-][A-Z0-9]+)*")
 DOUBT_WORDS = {"no", "not", "dont", "don't", "wait", "cancel", "stop", "but", "maybe", "later",
@@ -184,7 +187,8 @@ def tool_input(order):
 
 
 def is_canadian(sym):
-    return str(sym or "").strip().upper().endswith(CA_SUFFIXES)
+    s = str(sym or "").strip().upper()
+    return s.endswith(CA_SUFFIXES) and s.replace("-", ".") not in US_DOT_V
 
 
 def currency_of(order):

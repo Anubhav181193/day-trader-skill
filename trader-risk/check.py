@@ -94,6 +94,9 @@ TICKER = re.compile(r"^[A-Z]{1,5}([.\-][A-Z]{1,2})?$")
 # Canadian listings, Yahoo style: RY.TO, RCI.B.TO (or RCI-B.TO), REI.UN.TO, ABC.V
 CA_TICKER = re.compile(r"^[A-Z0-9]{1,6}([.\-][A-Z]{1,2})?\.(TO|V|NE|CN)$")
 CA_SUFFIXES = (".TO", ".V", ".NE", ".CN")
+# US class shares whose class letter is V look like TSX Venture tickers. They stay US
+# (Nasdaq Trader's lists, read 2026-11-23): MKC.V is McCormick's voting stock on the NYSE.
+US_DOT_V = ("MKC.V",)
 HHMM = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
 CENT = 0.005
 FRESH_MINUTES = 15
@@ -227,7 +230,7 @@ def parse_utc(text):
 def market_of(sym):
     """'ca' for a Canadian listing (RY.TO, ABC.V), 'us' for everything else."""
     s = (sym or "").upper()
-    return "ca" if s.endswith(CA_SUFFIXES) else "us"
+    return "ca" if s.endswith(CA_SUFFIXES) and s.replace("-", ".") not in US_DOT_V else "us"
 
 
 def currency_of(order):

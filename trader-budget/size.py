@@ -94,6 +94,9 @@ DEFAULTS = {
 EPS = 1e-9
 FRESH_MINUTES = 15
 CA_SUFFIXES = (".TO", ".V", ".NE", ".CN")   # Yahoo suffixes for Canadian listings
+# US class shares whose class letter is V look like TSX Venture tickers. They stay US
+# (Nasdaq Trader's lists, read 2026-11-23): MKC.V is McCormick's voting stock on the NYSE.
+US_DOT_V = ("MKC.V",)
 SETUP_WORDS = {"orb": "opening-range breakout", "flag": "flag", "bounce": "oversold bounce"}
 
 
@@ -318,7 +321,7 @@ def plan_currency(plan):
     if cur:
         return cur
     sym = str((plan or {}).get("symbol") or "").strip().upper()
-    if sym.endswith(CA_SUFFIXES):
+    if sym.endswith(CA_SUFFIXES) and sym.replace("-", ".") not in US_DOT_V:
         return "USD" if ".U." in sym.replace("-", ".") else "CAD"
     return "USD"
 

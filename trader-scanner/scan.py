@@ -154,6 +154,9 @@ TSX_EARLY_CLOSE = {  # 1:00 p.m. ET
 CALENDARS = {"us": ("NYSE", NYSE_HOLIDAYS, NYSE_EARLY_CLOSE), "ca": ("TSX", TSX_HOLIDAYS, TSX_EARLY_CLOSE)}
 # Yahoo suffixes for Canadian listings: Toronto, TSX Venture, Cboe Canada, CSE
 CA_SUFFIXES = (".TO", ".V", ".NE", ".CN")
+# US class shares whose class letter is V look like TSX Venture tickers. They stay US
+# (Nasdaq Trader's lists, read 2026-11-23): MKC.V is McCormick's voting stock on the NYSE.
+US_DOT_V = ("MKC.V",)
 TSX_URL = "https://www.tsx.com/json/company-directory/search/%s/%%5E*"
 TSX_FILES = (("tsx", ".TO"), ("tsxv", ".V"))
 NOT_A_STOCK = ("ETF", "MUTUALFUND", "INDEX", "CURRENCY", "CRYPTOCURRENCY", "FUTURE", "OPTION")
@@ -236,7 +239,7 @@ def parse_hhmm(text, flag="--at"):
 def market_of(sym):
     """'ca' for a Canadian listing (RY.TO, ABC.V), 'us' for everything else."""
     s = (sym or "").upper()
-    return "ca" if s.endswith(CA_SUFFIXES) else "us"
+    return "ca" if s.endswith(CA_SUFFIXES) and s.replace("-", ".") not in US_DOT_V else "us"
 
 
 def markets_of(symbols):
@@ -319,7 +322,7 @@ def yahoo_get(path):
 def to_yahoo(sym):
     s = sym.upper()
     for suf in CA_SUFFIXES:
-        if s.endswith(suf):   # RCI.B.TO -> RCI-B.TO: keep the exchange suffix
+        if s.endswith(suf) and s.replace("-", ".") not in US_DOT_V:   # RCI.B.TO -> RCI-B.TO: keep the exchange suffix
             return s[:-len(suf)].replace(".", "-") + suf
     return s.replace(".", "-")
 

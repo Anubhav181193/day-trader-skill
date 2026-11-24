@@ -64,6 +64,9 @@ YAHOO = "https://feeds.finance.yahoo.com/rss/2.0/headline?s=%s&region=US&lang=en
 YAHOO_CA = "https://feeds.finance.yahoo.com/rss/2.0/headline?s=%s&region=CA&lang=en-CA"
 # Yahoo suffixes for Canadian listings: Toronto, TSX Venture, Cboe Canada, CSE
 CA_SUFFIXES = (".TO", ".V", ".NE", ".CN")
+# US class shares whose class letter is V look like TSX Venture tickers. They stay US
+# (Nasdaq Trader's lists, read 2026-11-23): MKC.V is McCormick's voting stock on the NYSE.
+US_DOT_V = ("MKC.V",)
 SEDAR_NOTE = ("SEC filings skipped for %s: Canadian issuers file on SEDAR+ (sedarplus.ca), "
               "which this tool does not read")
 CHART = "https://%s.finance.yahoo.com/v8/finance/chart/%s?range=1d&interval=5m"
@@ -205,14 +208,15 @@ class Fetcher(object):
 
 
 def is_canadian(ticker):
-    return (ticker or "").upper().endswith(CA_SUFFIXES)
+    s = (ticker or "").upper()
+    return s.endswith(CA_SUFFIXES) and s.replace("-", ".") not in US_DOT_V
 
 
 def yahoo_symbol(ticker):
     """BRK.B -> BRK-B; a Canadian listing keeps its exchange suffix: RCI.B.TO -> RCI-B.TO."""
     s = ticker.upper()
     for suf in CA_SUFFIXES:
-        if s.endswith(suf):
+        if s.endswith(suf) and s.replace("-", ".") not in US_DOT_V:
             return s[:-len(suf)].replace(".", "-") + suf
     return s.replace(".", "-")
 

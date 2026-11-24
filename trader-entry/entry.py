@@ -135,6 +135,9 @@ CALENDARS = {"us": ("NYSE", NYSE_HOLIDAYS, NYSE_EARLY_CLOSE), "ca": ("TSX", TSX_
 EXCHANGE_SITE = {"us": "nyse.com", "ca": "tsx.com"}
 # Yahoo suffixes for Canadian listings: Toronto, TSX Venture, Cboe Canada, CSE
 CA_SUFFIXES = (".TO", ".V", ".NE", ".CN")
+# US class shares whose class letter is V look like TSX Venture tickers. They stay US
+# (Nasdaq Trader's lists, read 2026-11-23): MKC.V is McCormick's voting stock on the NYSE.
+US_DOT_V = ("MKC.V",)
 CALENDAR_YEARS = (2026, 2027)
 OPEN = datetime.time(9, 30)
 CLOSE = datetime.time(16, 0)
@@ -238,7 +241,7 @@ def ampm(t):
 def market_of(sym):
     """'ca' for a Canadian listing (RY.TO, ABC.V), 'us' for everything else."""
     s = (sym or "").upper()
-    return "ca" if s.endswith(CA_SUFFIXES) else "us"
+    return "ca" if s.endswith(CA_SUFFIXES) and s.replace("-", ".") not in US_DOT_V else "us"
 
 
 def trading_day(d, market="us"):
@@ -276,7 +279,7 @@ def yahoo_symbol(sym):
     """BRK.B -> BRK-B; a Canadian listing keeps its exchange suffix: RCI.B.TO -> RCI-B.TO."""
     s = sym.upper()
     for suf in CA_SUFFIXES:
-        if s.endswith(suf):
+        if s.endswith(suf) and s.replace("-", ".") not in US_DOT_V:
             return s[:-len(suf)].replace(".", "-") + suf
     return s.replace(".", "-")
 
@@ -289,7 +292,7 @@ def from_yahoo(ysym):
     spells them (BRK-B), as they always have."""
     s = (ysym or "").upper()
     for suf in CA_SUFFIXES:
-        if s.endswith(suf):
+        if s.endswith(suf) and s.replace("-", ".") not in US_DOT_V:
             return s[:-len(suf)].replace("-", ".") + suf
     return s
 
