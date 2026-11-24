@@ -135,6 +135,26 @@ submits orders directly to the market. So with IBKR the final yes happens in
 IBKR as well. Set `"broker": "ibkr"` in `trader/config.json`. Set its tools
 that draft orders to Needs approval too.
 
+## Canadian stocks (TSX and TSX Venture)
+
+- **Alpaca cannot trade them.** Alpaca trades US listings only. With
+  `"broker": "alpaca"` (the default) a Canadian ticket (RY.TO, RCI.B.TO,
+  ABC.V) is never READY, and trader-risk blocks it too. Say so plainly; do
+  not look for a US look-alike or route it anywhere else.
+- **Interactive Brokers (Setup B) can.** Set `"broker": "ibkr"`. The ticket
+  names the IBKR contract: Yahoo's `RCI.B.TO` is `RCI.B` on exchange TSE,
+  currency CAD (`.V` is exchange VENTURE). Check the contract in IBKR before
+  approving it there.
+- **Questrade and Wealthsimple** have no Claude connector, so this pack
+  cannot send orders to them. The user can read the ticket and enter the
+  order there by hand; nothing here records that as placed until they tell
+  you, and then only with `ticket.py result` / `fill`.
+- **Currency.** A Canadian order carries `"currency": "CAD"` and its ticket
+  shows C$. Your limits are in `account_currency` (default USD); trader-risk
+  blocks an order whose currency is not your account's. There is no currency
+  conversion. A CAD account at IBKR: set `"account_currency": "CAD"`. The
+  `currency` field is ours and is never sent to the broker.
+
 ## Steps: the entry
 
 1. `ticket.py show`. Only READY tickets go to the user. A ticket that is NOT

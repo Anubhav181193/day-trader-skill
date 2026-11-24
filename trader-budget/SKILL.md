@@ -61,6 +61,11 @@ If `trader/config.json` does not exist, copy `config.example.json` into
   **min_reward_risk** (1.0), **require_stop** (true), **no_entries_before** / **no_entries_after**
   ("09:45" / "15:30") and **flat_by** ("15:55"), all New York time.
 - **blocked**: tickers they never want to trade.
+- **account_currency** (optional, default "USD"): the currency of the budget and every limit.
+  Canadian stocks (RY.TO) trade in Canadian dollars: they need a CAD account at a broker that
+  trades the TSX (Interactive Brokers, `"broker": "ibkr"`) and `"account_currency": "CAD"`.
+  A plan in another currency than the account is refused: there is no currency conversion.
+  A CAD plan shows C$ amounts and its order carries `"currency": "CAD"`.
 - Keep **paper** true until they have watched it work on a paper account.
 
 ## Step 2: size the trade

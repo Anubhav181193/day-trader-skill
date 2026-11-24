@@ -29,6 +29,13 @@ bigger loss at the same stop. Zero shares (the stop is too far away for your
 max loss) is a plain refusal: no order is written. So is a reward:risk under
 min_reward_risk (the price ran toward the target since the plan).
 
+Currency. Your limits (budget, max loss, max order) are in "account_currency"
+(default USD). A plan carries "currency" when it is not USD (trader-exit writes
+"CAD" for a Canadian listing such as RY.TO; a .TO / .V plan without one is taken
+as CAD). A plan in another currency than your account is refused: no currency
+conversion is tried. A CAD plan with a CAD account is sized as usual, shown in
+C$, and its order carries "currency": "CAD" (US orders carry no currency field).
+
 Weights mode (kept from v1, no longer the headline): split a budget across a
 list of stocks by weight.
 
@@ -82,9 +89,11 @@ DEFAULTS = {
     "allow_margin": False,
     "allow_short": False,
     "pdt_guard": False,
+    "account_currency": "USD",
 }
 EPS = 1e-9
 FRESH_MINUTES = 15
+CA_SUFFIXES = (".TO", ".V", ".NE", ".CN")   # Yahoo suffixes for Canadian listings
 SETUP_WORDS = {"orb": "opening-range breakout", "flag": "flag", "bounce": "oversold bounce"}
 
 
@@ -293,11 +302,25 @@ def _num(x):
     return "%.2f" % x
 
 
-def money(x):
+def money(x, currency=None):
+    """$ for US dollars, C$ for Canadian, else the code in front."""
+    prefix = {None: "$", "": "$", "USD": "$", "CAD": "C$"}.get(currency, (currency or "") + " ")
     x = float(x)
     if abs(x - round(x)) < 0.005:
-        return "$" + "{:,.0f}".format(round(x))
-    return "$" + "{:,.2f}".format(x)
+        return prefix + "{:,.0f}".format(round(x))
+    return prefix + "{:,.2f}".format(x)
+
+
+def plan_currency(plan):
+    """The plan's "currency" (absent = USD), or CAD for a Canadian listing without one
+    (USD for a .U listing, which is priced in US dollars)."""
+    cur = str((plan or {}).get("currency") or "").strip().upper()
+    if cur:
+        return cur
+    sym = str((plan or {}).get("symbol") or "").strip().upper()
+    if sym.endswith(CA_SUFFIXES):
+        return "USD" if ".U." in sym.replace("-", ".") else "CAD"
+    return "USD"
 
 
 # ---------------------------------------------------------------- plan mode (the default)
@@ -330,6 +353,15 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
     blocked = {str(b).upper() for b in (c.get("blocked") or [])}
     if sym in blocked:
         raise SizeError("%s is on your blocked list" % sym)
+    cur = plan_currency(plan)
+    acct_cur = str(c.get("account_currency") or "USD").strip().upper()
+    if cur != acct_cur:
+        raise SizeError("%s trades in %s but your limits are in %s: set \"account_currency\" in "
+                        "trader/config.json, or use a %s account. No currency conversion is tried; no order."
+                        % (sym, cur, acct_cur, cur))
+
+    def m(x):
+        return money(x, cur)
 
     budget = float(budget if budget is not None else (c.get("budget") or 0))
     if budget <= 0:
@@ -357,28 +389,28 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
 
     cash_buffer = round(budget * buf_pct / 100.0, 2)
     available = budget - cash_buffer
-    cash_note = "budget %s minus the %s cash buffer" % (money(budget), money(cash_buffer))
+    cash_note = "budget %s minus the %s cash buffer" % (m(budget), m(cash_buffer))
     if cash is not None and cash - cash_buffer < available - 0.005:
         available = cash - cash_buffer
-        cash_note = "cash %s in trader/portfolio.json minus the %s buffer" % (money(cash), money(cash_buffer))
+        cash_note = "cash %s in trader/portfolio.json minus the %s buffer" % (m(cash), m(cash_buffer))
     available = max(round(available, 2), 0.0)
 
     limits = []
     max_loss = _f(c.get("max_loss_per_trade_usd"))
     if max_loss:
         limits.append({"name": "max loss", "usd": max_loss, "per": risk, "shares": shares_for(max_loss, risk),
-                       "how": "%s max loss / %s risk a share" % (money(max_loss), _price(risk))})
+                       "how": "%s max loss / %s risk a share" % (m(max_loss), _price(risk))})
     cap_pct = _f(c.get("max_position_pct"))
     if cap_pct:
         cap = round(budget * cap_pct / 100.0, 2)
         limits.append({"name": "position cap", "usd": cap, "per": ref, "shares": shares_for(cap, ref),
-                       "how": "%s%% of %s = %s / %s" % (_num(cap_pct), money(budget), money(cap), _price(ref))})
+                       "how": "%s%% of %s = %s / %s" % (_num(cap_pct), m(budget), m(cap), _price(ref))})
     max_order = _f(c.get("max_order_usd"))
     if max_order:
         limits.append({"name": "max order", "usd": max_order, "per": ref, "shares": shares_for(max_order, ref),
-                       "how": "%s / %s" % (money(max_order), _price(ref))})
+                       "how": "%s / %s" % (m(max_order), _price(ref))})
     limits.append({"name": "cash", "usd": available, "per": ref, "shares": shares_for(available, ref),
-                   "how": "%s = %s / %s" % (cash_note, money(available), _price(ref))})
+                   "how": "%s = %s / %s" % (cash_note, m(available), _price(ref))})
 
     qty = max(0, min(l["shares"] for l in limits))
     bound = [l["name"] for l in limits if l["shares"] == qty]
@@ -391,18 +423,18 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
         if bound[0] == "max loss":
             refusal = ("one share risks %s (entry %s minus stop %s), more than your %s max loss per trade. "
                        "No order. Skip this trade, or plan a closer stop with trader-exit."
-                       % (money(risk), _price(ref), _price(stop), money(max_loss)))
+                       % (m(risk), _price(ref), _price(stop), m(max_loss)))
         else:
             refusal = ("one share of %s costs %s, more than your %s limit (%s). No order."
-                       % (sym, money(ref), bound[0], limits[[l["name"] for l in limits].index(bound[0])]["how"]))
+                       % (sym, m(ref), bound[0], limits[[l["name"] for l in limits].index(bound[0])]["how"]))
     elif _f(c.get("min_reward_risk")) and reward_c < _f(c["min_reward_risk"]) * risk_c - EPS:
         refusal = ("reward:risk %.2f (target %s, entry %s, stop %s) is under your minimum %s, so trader-risk "
                    "would block it. No order. Skip it, or make a new plan with trader-exit."
                    % (reward_c / float(risk_c), _price(target), _price(ref), _price(stop), _num(c["min_reward_risk"])))
     elif cost < float(c.get("min_order_usd") or 0) - 0.005:
         refusal = ("%d share%s of %s is %s, under your %s minimum order. No order."
-                   % (qty, "" if qty == 1 else "s", sym, money(cost), money(c["min_order_usd"])))
-    return {
+                   % (qty, "" if qty == 1 else "s", sym, m(cost), m(c["min_order_usd"])))
+    out = {
         "symbol": sym, "side": "buy", "setup": plan.get("setup", ""), "date": plan.get("date"),
         "entry_time": plan.get("entry_time", ""), "entry_plan": round_cent(entry_plan),
         "entry": ref, "entry_from": ref_from, "stop": stop, "target": target,
@@ -413,26 +445,37 @@ def size_trade(plan, cfg, budget=None, limit=None, price=None, cash=None, today=
         "cost": cost, "max_loss": loss, "flat_by": plan.get("flat_by") or c.get("flat_by"),
         "order_type": "limit" if limit is not None else "market", "refusal": refusal,
     }
+    if cur != "USD":
+        out["currency"] = cur
+    return out
 
 
 def bracket_order(s):
     """The one proposed order, Alpaca place_stock_order fields (strings) plus why and plan."""
     if s["refusal"] or s["qty"] <= 0:
         return None
+
+    def m(x):
+        return money(x, s.get("currency"))
+
     o = {"symbol": s["symbol"], "side": "buy", "qty": str(int(s["qty"])), "type": s["order_type"],
          "time_in_force": "day"}
     if s["order_type"] == "limit":
         o["limit_price"] = _price(s["entry"])
     setup = SETUP_WORDS.get(s["setup"], s["setup"] or "day trade")
     why = ("%s on %s: %d shares, bound by your %s (%d x %s = %s at the stop)"
-           % (setup, s["symbol"], s["qty"], {"max loss": "%s max loss per trade" % money(s["max_loss_per_trade_usd"] or 0),
+           % (setup, s["symbol"], s["qty"], {"max loss": "%s max loss per trade" % m(s["max_loss_per_trade_usd"] or 0),
                                              "position cap": "position cap", "max order": "max order",
                                              "cash": "cash after the buffer"}[s["bound_by"]],
-              s["qty"], _price(s["risk_per_share"]), money(s["max_loss"])))
+              s["qty"], _price(s["risk_per_share"]), m(s["max_loss"])))
     o.update({
         "order_class": "bracket",
         "take_profit_limit_price": _price(s["target"]),
         "stop_loss_stop_price": _price(s["stop"]),
+    })
+    if s.get("currency"):
+        o["currency"] = s["currency"]   # not a place_stock_order field: trader-broker never sends it
+    o.update({
         "why": why,
         "plan": {"entry": s["entry"], "stop": s["stop"], "target": s["target"],
                  "risk_per_share": s["risk_per_share"], "max_loss": s["max_loss"], "setup": s["setup"],
@@ -442,6 +485,9 @@ def bracket_order(s):
 
 
 def plan_report(s, order, notes=()):
+    def m(x):
+        return money(x, s.get("currency"))
+
     lines = []
     setup = SETUP_WORDS.get(s["setup"], s["setup"] or "setup")
     lines.append("%s buy, %s, entry %s%s" % (s["symbol"], setup, _price(s["entry_plan"]),
@@ -467,8 +513,8 @@ def plan_report(s, order, notes=()):
         lines.append("Education and tooling, not financial advice.")
         return "\n".join(lines)
     lines.append("Size: %d shares of %s = %s at %s. Max loss at the stop: %d x %s = %s."
-                 % (s["qty"], s["symbol"], money(s["cost"]), _price(s["entry"]), s["qty"],
-                    _price(s["risk_per_share"]), money(s["max_loss"])))
+                 % (s["qty"], s["symbol"], m(s["cost"]), _price(s["entry"]), s["qty"],
+                    _price(s["risk_per_share"]), m(s["max_loss"])))
     lines.append("A stop is an order, not a promise: in a fast market it can fill below %s." % _price(s["stop"]))
     lines.append("")
     lines.append("Proposed bracket order (place_stock_order arguments, nothing has been placed):")
@@ -480,6 +526,9 @@ def plan_report(s, order, notes=()):
         lines.append("Flat by %s New York: anything still open then gets closed (trader-alerts rings, "
                      "trader-broker flatten)." % s["flat_by"])
     lines.append("")
+    if s.get("currency"):
+        lines.append("Prices and amounts are in %s (%s), the same as your account_currency."
+                     % (s["currency"], m(0)[:-1]))
     lines.append("Next: trader-risk checks it, then trader-broker asks you yes or no.")
     lines.append("Education and tooling, not financial advice.")
     return "\n".join(lines)
