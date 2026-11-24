@@ -45,7 +45,11 @@ and `--min-volume` (daily 1,000,000 for US names and 200,000 for Canadian
 ones unless you give a number, orb 0),
 `--or-minutes 15`, `--max-confirm 200` (orb stage 2),
 `--now "2026-10-19 10:15"` (New York time) to pin the clock, `--offline PATH`
-to read saved Yahoo files, `--no-write`, `--show N`, `--json`. Exit code 0
+to read saved Yahoo files, `--no-write`, `--show N`, `--json`. Ranking (both
+`daily` and `orb`): `--top 10` (hits kept, 0 = all), `--sort volume` (the
+default, see "The ranking") or `--sort traded` (daily: every hit, most dollars
+traded first) / `--sort time` (orb: every hit, earliest breakout first), and
+for daily `--confirm-volume 50` (charts whose volume is fetched). Exit code 0
 when the scan found something, 1 when it found nothing or could not run (the
 reason is one plain line).
 
@@ -135,8 +139,9 @@ lows:
 | `oversold_bounce` | RSI 14 was under 30 yesterday and today closed up |
 
 A closing-high breakout fires more often than an intraday-high one (KO on
-Oct 16 broke its 20-day closing high, not its 20-day intraday high). Hits are
-listed most traded first (price times volume).
+Oct 16 broke its 20-day closing high, not its 20-day intraday high). The hits
+are then ranked and the top 10 kept (see "The ranking"); `--sort traded` lists
+every hit, most traded first (price times volume), as before.
 
 ## The opening-range breakout scan (during the session)
 
@@ -170,6 +175,52 @@ weekend or holiday, after the close, or after `no_entries_after` (an expired
 setup) it prints one plain line and writes nothing. The 1:00 PM early closes
 are in the calendar.
 
+## The ranking
+
+A scan on a market-wide bounce tags hundreds of charts (529 on Nov 23 2026),
+and 71 of 200 charts can break their opening range on a strong morning. Both
+scans rank their hits and keep the top `--top` (10). The rest are kept, short,
+under `others` in the watchlist, with `hits_total`; trader-news and
+trader-entry read only `hits`.
+
+**What the rank is.** How unusual the volume is. Daily: the last session's
+volume over its 20-session average. Opening range: today's volume up to the
+cutoff over the volume to the same clock time on the 4 sessions before. The
+daily scan has only closes from spark, so it ranks in two stages: every hit
+by its move against its usual move (today's close-to-close move over the
+average of the 20 before), then the `--confirm-volume` (50) highest get their
+v8 daily chart (one request each, about 25 seconds) and are ranked by
+relative volume.
+
+**Why volume, and what it does not do.** `tests/backtest_rank.py` checked it on
+the 500 most traded US names over the last 250 sessions (30,439 hits):
+
+| the next session | all hits | top 10 as ranked | top 10 most traded |
+| --- | --- | --- | --- |
+| high to low, against the stock's own average | 1.04x | 1.22x | 1.06x |
+| open to close, either way | 1.73 % | 2.24 % | 2.08 % |
+| beat the market over 5 sessions | 48.2 % | 48.7 % | 46.6 % |
+
+Relative volume lined up with the next day's range in order, from 0.88x the
+stock's own average (under 0.7x volume) to 1.44x (over 3x volume). It did not
+pick a direction: the top 10 beat the market over the next 5 days less than
+half the time. A score of trend, strength against the market and setup
+quality was tried first and ordered nothing, so it is not used. The universe
+is today's most traded names, which leans toward stocks that did well. The
+opening-range rank uses the same idea on 5-minute bars; it was not
+backtested on its own (Yahoo keeps about 60 days of 5-minute bars).
+
+So say it the way it is: "these are the charts most in play, the ones most
+likely to move a lot tomorrow, either way." Never "the best setups" or
+"the ones most likely to go up". Each ranked hit carries `rank`, `rvol` (when
+fetched), `move_ratio` and `why`: plain facts (volume, the move, the 50-day
+average, the 52-week high, the day's change) that do not change the rank.
+
+When most hits are the same trade, the daily scan says so in one line
+("Broad pullback: 289 of 529 hits ... are oversold or bouncing off
+oversold"): on a bounce day, 250 oversold bounces are mostly one bet on the
+market, not 250 separate ones.
+
 ## Data and limits
 
 - Yahoo's chart and spark endpoints are free, unofficial and can lag. Bars are
@@ -184,10 +235,11 @@ are in the calendar.
 
 1. Once a week or so: `scan.py universe`.
 2. Before the open: `scan.py daily`. Tell the user the counts (fetched,
-   liquid, scanned, hits) and the top few by setup.
+   liquid, scanned, hits), the mood line if there is one, and the top 10 most
+   in play with their volume, and that in play means likely to move, either way.
 3. After 9:50 AM ET (10:15 is the classic): `scan.py orb`. Tell the user how
-   many usable charts broke their range and when, and that a later hit is
-   closer to the price now.
+   many usable charts broke their range, the top 10 by volume so far and when
+   each broke out, and that a later hit is closer to the price now.
 4. The user picks one chart. Hand it on: `/trader-news TICKER` (what is moving
    it), then `/trader-entry TICKER` (the entry bar by bar). Never pick for them.
 
@@ -197,7 +249,7 @@ Monday Oct 19 2026, scan at 10:15 AM over the reel's 234-ticker wall
 (`tests/fixtures/trader-scanner/wall5m-2026-10-19.json.gz`, real Yahoo charts):
 
 ```
-python3 scan.py orb --offline wall5m-2026-10-19.json.gz --now "2026-10-19 10:15" --min-price 0
+python3 scan.py orb --offline wall5m-2026-10-19.json.gz --now "2026-10-19 10:15" --min-price 0 --sort time
 Fetched 233 of 234 charts (1 failed or had no data); 231 usable; 95 candidates, 95 confirmed with real highs and lows.
 42 of 231 charts closed above their opening-range high by 10:15 AM:
    9:50 AM  AMC         $2.97  range 2.90 to 2.96  +0.50% over

@@ -61,7 +61,7 @@ or in the `SEC_USER_AGENT` environment variable.
 
 | command | job | what it does |
 | --- | --- | --- |
-| `/trader-scanner` | Chart Scanner | Scans thousands of charts for setups: opening-range breakouts, flags, oversold bounces. |
+| `/trader-scanner` | Chart Scanner | Scans thousands of charts for setups: opening-range breakouts, flags, oversold bounces. Keeps the 10 most in play, by unusual volume. |
 | `/trader-news` | News Monitor | Tracks breaking news on every stock you watch and flags what moves it. |
 | `/trader-entry` | Entry Timer | Watches a setup bar by bar and tells you the moment to get in. |
 | `/trader-exit` | Exit Planner | Sets your stop and your target before you enter, so you know when to get out. |
@@ -119,6 +119,17 @@ An example, the trade in the reel: Tesla, Monday October 19 2026, real data.
    card asks you one more time.
 9. **`/trader-alerts`** rings on the stop, the target and at 3:55 PM to
    flatten whatever is still open.
+
+## A short list, ranked by volume
+
+A scan on a market-wide bounce can tag 500 charts. The scanner keeps the 10
+most in play: the ones trading far more shares than usual, today's volume
+against their own average. Over the past year (500 most traded US names, 250
+sessions, `tests/backtest_rank.py`), the top 10 that way moved 2.24 % open to
+close the next day against 1.73 % for all hits, and their range was 1.22x
+their own average. They did not pick a direction: they beat the market over
+the next 5 days 48.7 % of the time. So the list says which charts are likely
+to move, not which way. `--top 0` keeps every hit.
 
 ## Canada (TSX and TSX Venture)
 

@@ -64,6 +64,12 @@ with nasdaqlisted.txt and otherlisted.txt; daily and orb take a folder of
 <T>.json v8 chart files or spark responses, or one file that is a spark
 response, a v8 chart, or a bundle {"TSLA": <v8 json>, ...}. .json.gz is fine.
 
+Ranking (daily and orb): the hits are ordered by how unusual their volume is
+and the top --top (10) kept; the rest go under "others". --sort traded (daily)
+or --sort time (orb) lists every hit the old way. Unusual volume came before
+bigger moves the next day over the past year, either way; it does not pick a
+direction (tests/backtest_rank.py).
+
 A scan is a list of charts that match a rule, not a list of stocks to buy.
 Exit code 0 when the scan found something, 1 when it did not or could not run.
 """
@@ -545,7 +551,7 @@ def build_universe(texts):
 #      shares. Yahoo's instrumentType catches the rest at scan time.
 CA_SYMBOL = re.compile(r"^[A-Z0-9]{1,6}(\.(A|B|C|UN))?$")
 CA_FUND = re.compile(r"\betfs?\b|\bfunds?\b|\bindex\b|\bportfolios?\b|\bcdrs?\b|\bsplit\b"
-                     r"|\bcovered call\b|\bhedged\b|\btracker\b|\bclass [a-z] units?\b")
+                     r"|\bcovered call\b|\bhedged\b|\btracker\b|\bphysical\b|\bclass [a-z] units?\b")
 
 
 def classify_ca(sym, company):
@@ -691,6 +697,138 @@ def scan_daily(data, symbols, now_utc, min_price, min_volume):
     last_date = max(dates, key=lambda d: (dates[d], d)) if dates else None
     counts["hits"] = len(hits)
     return hits, counts, last_date
+
+
+# ---------------------------------------------------------------- ranking the daily hits
+#
+# A daily scan on a market-wide bounce tags hundreds of charts. The rank puts the
+# ones most IN PLAY on top: the charts that traded far more shares than usual.
+# That is the one thing that held up when the ranking was checked on the past
+# year (500 most traded US names, 235 sessions, 28,573 hits; see
+# tests/backtest_rank.py): the more unusual the volume on the signal day, the
+# bigger the next day's range, in order, from 0.88x the stock's own average
+# (under 0.7x volume) to 1.45x (over 3x volume). The top 10 a day by relative
+# volume moved 2.32 % open to close the next day against 1.73 % for all hits.
+# Direction did not: they beat the market over the next 5 days 48.7 % of the
+# time. A trend, strength and setup-quality score was tried first and ordered
+# nothing, not the move and not the direction, so it is not used.
+#
+# Two stages, because spark has closes and no volume history:
+#   1. every hit: today's close-to-close move over its average move of the 20
+#      sessions before (a closes-only proxy for "in play")
+#   2. the --confirm-volume (50) highest by that: the v8 daily chart, and
+#      relative volume = the last session's volume over the 20 before it
+# Ranked by relative volume where it was fetched, then by the move ratio.
+
+RANK_TOP = 10          # hits printed and kept in the watchlist by default
+RANK_CONFIRM = 50      # stage-2 v8 charts fetched for relative volume, highest move ratio first
+MA_LONG = 50
+
+
+def _mean(xs):
+    return sum(xs) / float(len(xs))
+
+
+def move_ratio(closes, n=20):
+    """|last close-to-close move| over the average |move| of the n sessions before it."""
+    if len(closes) < n + 2:
+        return None
+    mv = [abs(closes[i] / closes[i - 1] - 1) for i in range(len(closes) - n - 1, len(closes)) if closes[i - 1]]
+    base = _mean(mv[:-1]) if len(mv) > 1 else 0
+    return mv[-1] / base if base > 0 else None
+
+
+def context(closes, meta=None):
+    """Plain facts about the chart, shown next to a ranked hit. They do not move the rank."""
+    c = closes
+    out = []
+    if len(c) >= MA_LONG:
+        out.append("over its 50-day average" if c[-1] > _mean(c[-MA_LONG:]) else "under its 50-day average")
+    hi52 = (meta or {}).get("fiftyTwoWeekHigh")
+    hi = max(float(hi52), max(c)) if hi52 else None
+    if hi:
+        off = (1 - c[-1] / hi) * 100
+        out.append("at the 52-week high" if off < 0.5 else "%.0f%% under the 52-week high" % off)
+    if len(c) >= 2 and c[-2]:
+        out.append("%+.1f%% on the day" % ((c[-1] / c[-2] - 1) * 100))
+    return out
+
+
+def relative_volume(series, now_utc, market="us", n=20):
+    """Last complete session's volume over the average of the n before it, from a v8 daily chart."""
+    vols = {}
+    now = to_eastern(now_utc)
+    s = session(now.date(), market)
+    today_done = s is None or now.time() >= s[1]
+    for ts, v, c in zip(series["t"], series.get("v") or [], series["c"]):
+        if v is None or c is None:
+            continue
+        d = ts_to_eastern(ts).date()
+        if d > now.date() or (d == now.date() and not today_done):
+            continue
+        vols[d] = float(v)
+    v = [vols[d] for d in sorted(vols)]
+    if len(v) < n + 1:
+        return None
+    avg = _mean(v[-n - 1:-1])
+    return v[-1] / avg if avg > 0 else None
+
+
+def rank_daily(hits, data, now_utc, rvols=None):
+    """Pure. Order hits by how unusual their volume was (rvols = {SYM: relative volume},
+    where fetched), then by the closes-only move ratio. Adds rank, move_ratio, rvol, why."""
+    rvols = rvols or {}
+    out = []
+    for h in hits:
+        s = data[h["symbol"]]
+        c = [x for _, x in daily_closes(s, now_utc, market_of(h["symbol"]))]
+        mr = move_ratio(c)
+        r = dict(h, move_ratio=round(mr, 2) if mr is not None else None)
+        rv = rvols.get(h["symbol"])
+        why = []
+        if rv is not None:
+            r["rvol"] = round(rv, 2)
+            why.append("%.1fx its usual volume" % rv)
+        if mr is not None:
+            why.append("moved %.1fx its usual daily move" % mr)
+        r["why"] = why + context(c, s.get("meta"))
+        out.append(r)
+    out.sort(key=lambda x: (x.get("rvol") is None, -(x.get("rvol") or 0), -(x["move_ratio"] or 0), x["symbol"]))
+    for i, r in enumerate(out, 1):
+        r["rank"] = i
+    return out
+
+
+def orb_rvol(series, day, cutoff, market="us", days=4):
+    """Volume of `day`'s session up to `cutoff` over the average volume to the same clock
+    time on the up-to-`days` sessions before it in the same 5-minute chart. None without them."""
+    if not series or not series.get("v"):
+        return None
+    now = sum(b["v"] for b in session_bars(series, day, cutoff, market))
+    prior = sorted({ts_to_eastern(ts).date() for ts in series["t"]} - {day})
+    prior = [d for d in prior if d < day and session(d, market)][-days:]
+    vols = [sum(b["v"] for b in session_bars(series, d, datetime.datetime.combine(d, cutoff.time()), market))
+            for d in prior]
+    vols = [v for v in vols if v > 0]
+    if not vols or now <= 0:
+        return None
+    return now / _mean(vols)
+
+
+def market_mood(hits, scanned):
+    """One plain line when one setup dominates: on a broad bounce most hits are the same trade."""
+    if not hits or not scanned:
+        return None
+    n = sum(1 for h in hits if "oversold_bounce" in h["setups"] or "oversold" in h["setups"])
+    if n >= 0.4 * len(hits) and n >= 0.1 * scanned:
+        return ("Broad pullback: %d of %d hits (%d%% of the charts scanned) are oversold or bouncing "
+                "off oversold. They are mostly one trade, the market's bounce, not %d separate ones."
+                % (n, len(hits), round(100.0 * n / scanned), n))
+    n = sum(1 for h in hits if "breakout_20d" in h["setups"])
+    if n >= 0.4 * len(hits) and n >= 0.1 * scanned:
+        return ("Broad rally: %d of %d hits are 20-day breakouts (%d%% of the charts scanned): "
+                "the market is lifting most charts at once." % (n, len(hits), round(100.0 * n / scanned)))
+    return None
 
 
 # ---------------------------------------------------------------- opening-range breakout
@@ -1085,12 +1223,44 @@ def cmd_daily(a):
     min_volume = a.min_volume if a.min_volume is not None else (
         MIN_VOLUME[markets[0]] if len(markets) == 1 else dict(MIN_VOLUME))
     hits, counts, last_date = scan_daily(data, symbols, now, a.min_price, min_volume)
+    all_hits, others, n_rvol = hits, [], 0
+    if a.sort == "volume" and hits:
+        rvols = {}
+        for h in hits:   # offline v8 charts already carry volume; spark closes do not
+            rv = relative_volume(data[h["symbol"]], now, market_of(h["symbol"]))
+            if rv is not None:
+                rvols[h["symbol"]] = rv
+        ranked = rank_daily(hits, data, now, rvols)
+        if not a.offline and a.confirm_volume:
+            todo = [r["symbol"] for r in ranked[:a.confirm_volume] if r["symbol"] not in rvols]
+            if todo:
+                progress(a, "Ranking: daily volume for the %d charts that moved most against their usual move..." % len(todo))
+            for k, sym in enumerate(todo):
+                if a.pause:
+                    SLEEP(a.pause)
+                try:
+                    rv = relative_volume(parse_chart(yahoo_get(chart_path(sym, "3mo", "1d")), sym),
+                                         now, market_of(sym))
+                except (ScanError, ValueError):
+                    continue
+                if rv is not None:
+                    rvols[sym] = rv
+            ranked = rank_daily(hits, data, now, rvols)
+        n_rvol = len(rvols)
+        hits = ranked if a.top == 0 else ranked[:a.top]
+        others = [{"symbol": r["symbol"], "setups": r["setups"], "rvol": r.get("rvol"), "move_ratio": r["move_ratio"]}
+                  for r in ranked[len(hits):]]
     nfailed = len(symbols) - counts["fetched"]
     as_of = ("%s close" % last_date.isoformat()) if last_date else None
     doc = {"created_by": "trader-scanner", "created_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"), "mode": "daily",
            "as_of": as_of, "universe": len(symbols), "scanned": counts["scanned"], "failed": nfailed,
            "source": "yahoo", "markets": markets, "filters": {"min_price": a.min_price, "min_volume": min_volume},
            "note": NOTE, "hits": hits}
+    if a.sort == "volume" and all_hits:
+        doc.update(ranked_by="relative volume, then move ratio", hits_total=len(all_hits), others=others)
+        mood = market_mood(all_hits, counts["scanned"])
+        if mood:
+            doc["mood"] = mood
     if a.offline:
         doc["offline"] = os.path.basename(a.offline.rstrip("/"))
     if not a.no_write:
@@ -1112,13 +1282,32 @@ def cmd_daily(a):
                            _n(a.min_price), vol_txt,
                            (", %d had under %d days" % (counts["short"], MIN_DAILY_BARS)) if counts["short"] else "",
                            "{:,}".format(counts["scanned"])))
-    if hits:
-        per = [(k, sum(1 for h in hits if k in h["setups"])) for k, _ in SETUPS]
-        print("%d chart%s matched a setup: %s." % (len(hits), "" if len(hits) == 1 else "s",
+    if all_hits:
+        per = [(k, sum(1 for h in all_hits if k in h["setups"])) for k, _ in SETUPS]
+        print("%d chart%s matched a setup: %s." % (len(all_hits), "" if len(all_hits) == 1 else "s",
                                                   ", ".join("%d %s" % (n, LABEL[k]) for k, n in per if n)))
-        print("Most traded first (price x volume):")
     else:
         print("No setups.")
+    if a.sort == "volume" and all_hits:
+        if doc.get("mood"):
+            print(doc["mood"])
+        print("Top %d most in play: %s" % (len(hits), "the most unusual volume first" if n_rvol else
+                                            "no daily volume fetched, so ranked by the move against its usual move"))
+        w = max([6] + [len(h["symbol"]) for h in hits])
+        for h in hits:
+            print("  %2d. %-*s %10s  %s" % (h["rank"], w, h["symbol"], money(h["price"], h.get("currency")),
+                                            ", ".join(LABEL[t] for t in h["setups"])))
+            print("      %s" % "; ".join(h["why"]))
+        if others:
+            print("  ... %d more ranked lower, kept under \"others\" in the watchlist (--top 0 keeps all)."
+                  % len(others))
+        if not a.no_write:
+            print("Wrote %s (mode daily, top %d of %d)." % (a.out, len(hits), len(all_hits)))
+        print("Unusual volume came before bigger moves over the past year, up or down: it says which charts "
+              "may move, not which way. Next: pick one chart, then /trader-news TICKER.")
+        return 0
+    if hits:
+        print("Most traded first (price x volume):")
     w = max([6] + [len(h["symbol"]) for h in hits[:a.show]])
     for h in hits[:a.show]:
         print("  %-*s %10s  RSI %5.1f  %s" % (w, h["symbol"], money(h["price"], h.get("currency")), h["rsi"],
@@ -1162,6 +1351,7 @@ def cmd_orb(a):
         if (today - day).days > 6:
             raise ScanError("Yahoo's free 5-minute history is short: replay %s with --offline" % day.isoformat())
         rng = "1d" if day == today else "5d"
+        rng2 = "5d" if a.sort == "volume" else rng   # stage 2: earlier sessions give the volume to compare
         progress(a, "Stage 1: 5-minute closes for %s symbols (%d spark requests)..."
                  % ("{:,}".format(len(symbols)), (len(symbols) + SPARK_MAX - 1) // SPARK_MAX))
         data, failed = fetch_spark(symbols, rng, "%dm" % BAR_MIN, a.pause, a)
@@ -1173,9 +1363,23 @@ def cmd_orb(a):
             done.append(sym)
             if len(done) % 50 == 0:
                 progress(a, "  stage 2: %d v8 charts so far" % len(done))
-            return parse_chart(yahoo_get(chart_path(sym, rng, "%dm" % BAR_MIN)), sym)
+            charts[sym] = parse_chart(yahoo_get(chart_path(sym, rng2, "%dm" % BAR_MIN)), sym)
+            return charts[sym]
+    charts = {}
     hits, counts, failed2 = scan_orb(data, symbols, day, cutoff, a.or_minutes, a.min_price, a.min_volume, confirm,
                                      a.max_confirm)
+    all_hits, others, n_rvol = hits, [], 0
+    if a.sort == "volume" and hits:
+        for h in hits:
+            rv = orb_rvol(charts.get(h["symbol"]) or data.get(h["symbol"]), day, cutoff, market_of(h["symbol"]))
+            if rv is not None:
+                h["rvol"] = round(rv, 2)
+                n_rvol += 1
+        ranked = sorted(hits, key=lambda h: (h.get("rvol") is None, -(h.get("rvol") or 0), h["symbol"]))
+        for i, h in enumerate(ranked, 1):
+            h["rank"] = i
+        hits = ranked if a.top == 0 else ranked[:a.top]
+        others = [{"symbol": h["symbol"], "at": h["at"], "rvol": h.get("rvol")} for h in ranked[len(hits):]]
     failed = dict(failed or {})
     failed.update(failed2)
     nfailed = len([s for s in symbols if s in failed])
@@ -1185,6 +1389,9 @@ def cmd_orb(a):
            "unconfirmed": counts["unconfirmed"], "source": "yahoo", "or_minutes": a.or_minutes,
            "interval": "%dm" % BAR_MIN,
            "filters": {"min_price": a.min_price, "min_volume": a.min_volume}, "note": NOTE, "hits": hits}
+    if a.sort == "volume" and all_hits:
+        doc.update(ranked_by="volume so far against the same time on the 4 sessions before",
+                   hits_total=len(all_hits), others=others)
     if a.offline:
         doc["offline"] = os.path.basename(a.offline.rstrip("/"))
     if not a.no_write:
@@ -1204,9 +1411,20 @@ def cmd_orb(a):
         print("PARTIAL: %s more candidates were not checked (only the %s most traded are; --max-confirm 0 "
               "checks all)." % ("{:,}".format(counts["unconfirmed"]), "{:,}".format(a.max_confirm)))
     if hits:
-        print("%d of %s charts closed above their opening-range high by %s:"
-              % (len(hits), ("the %s checked" % "{:,}".format(counts["confirmed"])) if counts["unconfirmed"]
-                 else "{:,}".format(counts["scanned"]), clock_label(cutoff)))
+        print("%d of %s charts closed above their opening-range high by %s%s"
+              % (len(all_hits), ("the %s checked" % "{:,}".format(counts["confirmed"])) if counts["unconfirmed"]
+                 else "{:,}".format(counts["scanned"]), clock_label(cutoff), "." if a.sort == "volume" else ":"))
+    if hits and a.sort == "volume":
+        print("Top %d most in play: %s" % (len(hits), "volume so far against the same time on the sessions before"
+                                            if n_rvol else "no earlier sessions in the data, so in alphabetical order"))
+        w = max([6] + [len(h["symbol"]) for h in hits])
+        for h in hits:
+            print("  %2d. %-*s %10s  broke out %8s  range %s to %s  %+.2f%% over%s" % (
+                h["rank"], w, h["symbol"], money(h["price"], h.get("currency")), h["at"], _p(h["or_low"]),
+                _p(h["or_high"]), h["pct_over"], ("  %.1fx usual volume" % h["rvol"]) if "rvol" in h else ""))
+        if others:
+            print("  ... %d more ranked lower, kept under \"others\" in the watchlist (--top 0 keeps all)." % len(others))
+    elif hits:
         w = max([6] + [len(h["symbol"]) for h in hits[:a.show]])
         for h in hits[:a.show]:
             print("  %8s  %-*s %10s  range %s to %s  %+.2f%% over" % (
@@ -1263,6 +1481,13 @@ def main(argv=None):
 
     p = sub.add_parser("daily", help="pre-market setups from daily closes")
     common(p, 5.0, None)   # None: 1,000,000 shares for US names, 200,000 for Canadian ones
+    p.add_argument("--sort", choices=["volume", "traded"], default="volume",
+                   help="volume: the top N most in play, by relative volume (default); "
+                        "traded: every hit, most dollars traded first")
+    p.add_argument("--top", type=int, default=RANK_TOP, help="hits to keep when ranked (%d; 0 = all)" % RANK_TOP)
+    p.add_argument("--confirm-volume", type=int, default=RANK_CONFIRM,
+                   help="fetch daily volume for this many hits, biggest move against their usual first (%d; 0 = none)"
+                        % RANK_CONFIRM)
     p = sub.add_parser("orb", help="opening-range breakouts so far today")
     common(p, 5.0, 0)
     p.add_argument("--or-minutes", type=int, default=15)
@@ -1270,6 +1495,10 @@ def main(argv=None):
                    help="v8 charts to fetch in stage 2, most traded first (%d; 0 = all)" % MAX_CONFIRM)
     p.add_argument("--at", help="cut the clock at this New York time, HH:MM")
     p.add_argument("--until", help="no new entries after HH:MM (default: config no_entries_after, 15:30)")
+    p.add_argument("--sort", choices=["volume", "time"], default="volume",
+                   help="volume: the top N most in play, by volume so far against the same time on the "
+                        "sessions before (default); time: every hit, earliest breakout first")
+    p.add_argument("--top", type=int, default=RANK_TOP, help="hits to keep when ranked (%d; 0 = all)" % RANK_TOP)
     p.add_argument("--config", default="trader/config.json")
     a = ap.parse_args(argv)
     if not a.cmd:
